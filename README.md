@@ -1,4 +1,4 @@
-<img width="1408" height="768" alt="Gemini_Generated_Image_n9eri0n9eri0n9er" src="https://github.com/user-attachments/assets/7e859f8a-7082-40a4-adbe-4e78575a32e6" /># Election Engine
+# Election Engine
 Election Engine, made by Alec in 2027, attempts to use Bayesian hierarchical distributions to estimate the outcome of an election.
 
 Calibrated for the NSW 2027 state election, but will attempt to use this in other elections to see how well it copes.
