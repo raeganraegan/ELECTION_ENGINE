@@ -38,8 +38,9 @@ $$
 * $\epsilon_b$ &ndash; The residual error term for booth $b$, sampling error, local jitter, etc.
 
 With the second equation of: 
+
 $$
-y_t = beta*S_t + d_t
+y_t = beta * S_t + d_t
 $$
 
 **Where:**
@@ -62,7 +63,7 @@ I was gonna draw how the code flows but I genuinely cba doing that. The programm
 
 ## Modelling V2, for dummies:
 
-I have a document so if you want 
+I have a document that dumbs down what has a distribution applied to it so if you want it let me know. It's an incredibly crude document hence why i'm not putting it here.
 
 ## One nation modelling
 
