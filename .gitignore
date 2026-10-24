@@ -1,0 +1,12 @@
+# 1. Ignore everything in the root directory
+*
+
+# 2. Whitelist your specific files
+!.gitignore
+!README.md
+!Executor.py
+!ENKI_V2.py
+!INANNA_V2.py
+!sample_booth_results.csv
+!sample_polls.csv
+!ModelDescription.pdf
