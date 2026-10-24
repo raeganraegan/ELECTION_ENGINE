@@ -40,7 +40,7 @@ $$
 With the second equation of: 
 
 $$
-y_t = beta * S_t + d_t
+y_t = \beta \times S_t + d_t
 $$
 
 **Where:**
