@@ -16,9 +16,9 @@ import numpy as np
 import pandas as pd
 
 from ENKI_HELPERS import (append_history, as_frame, check_booth_data, check_trace, combine_parties, diagnose_sampler,
-                          generate_booth_ridgeline_plot, generate_booth_swing_scatter_plot, generate_booth_volume_ridgeline,
-                          generate_seat_distribution_plot, jsonable, load_x, output_folder, print_run_report,
-                          save_actual_primaries, save_run_meta, save_trace, validate_inputs)
+                        generate_booth_ridgeline_plot, generate_booth_swing_scatter_plot, generate_booth_volume_ridgeline,
+                        generate_seat_distribution_plot, jsonable, load_x, output_folder, print_run_report,
+                        save_actual_primaries, save_run_meta, save_trace, validate_inputs)
 
 #Just making sure things are fine boss.
 try:
@@ -58,7 +58,7 @@ class ModelConfig:
     volume_total_sd_floor: float = 0.03           # min sd of the log growth of the TOTAL formal votes
     early_keywords: Sequence[str] = ("PRE-POLL", "PREPOLL", "PRE POLL", "EARLY", "POSTAL", "DECLARATION",
                                     "ABSENT", "IVOTE", "SPECIAL", "MOBILE")   # booths treated as early-voting
-    sigma_alpha_sd: float = 0.4                   # HalfNormal scale, booth baseline spread (data: ~0.2-0.36 by party)
+    sigma_alpha_sd: float = 0.25                   # HalfNormal scale, booth baseline spread (data: ~0.2-0.36 by party)
     verbose: bool = True                          # print design / collinearity / empirical checks
     volume_target_accept: float = 0.95
     exclude_booths: Sequence[str] = ("NONE",)
@@ -76,7 +76,7 @@ class ModelConfig:
     chains: int = 4
     seed: int = 42
     target_accept: float = 0.99
-    poll_house_sd: float = 3.25                    # extra poll error in points (2023 poll miss: 0.84)
+    poll_house_sd: float = 1.50                    # extra poll error in points (2023 poll miss: 0.84)
     d_persist: Optional[float] = None             # None (default): rho_d ~ Beta(2,2) is ESTIMATED inside the fit (AR(1) tide, shared by all parties)
     include_eps: bool = True                      # booth-level local-shift noise in predictive draws
     sigma_d_median: float = 0.30                  # LogNormal prior on sigma_d (log-ratio units). With beta pinned near 1,
@@ -91,7 +91,7 @@ class ModelConfig:
     # Hence you need to make your own assumptions, plug them in here.
     onp_layer: bool = True                        # polls table has an ONP column -> model One Nation as a separate ENTRANT
     onp_state_denominator: bool = True            # keep ONP in the statewide denominator (history AND polls) so a 20% ONP poll does not inflate the other parties; ONP still gets no seat share unless onp_layer
-    sigma_eps_sd: float = 0.15                     # HalfNormal scale of booth-election noise (was hard-coded); lower it if booth coverage sits well above 90%
+    sigma_eps_sd: float = 0.08                     # HalfNormal scale of booth-election noise (was hard-coded); lower it if booth coverage sits well above 90%
     run_attribution: bool = True                  # report which uncertainty layer drives the width of the seat band
     #SET BELOW TO 1.4 FOR REGIONAL/OUTER METRO SEATS, LOWER FOR LOWER ONE NATION SHARE.
     onp_seat_ratio_median: float = 0.65            # seat ONP share / statewide ONP share (East Hills 1999: 10.7 / 6.4)
@@ -135,7 +135,7 @@ class ModelConfig:
     election_cycle_years: float = 4.0             # years between elections (sets how many cycles ahead the target is)
     backtest_volume_sims: int = 4000              # draws used inside backtest_volume
     # --- statewide poll layer
-    time_horizon_gamma: float = 3.0               # extra poll sd (pts) = gamma * sqrt(years to election)
+    time_horizon_gamma: float = 1.5               # extra poll sd (pts) = gamma * sqrt(years to election)
     poll_z: float = 1.96                          # z behind the poll margin of error AND the low/high -> se conversion
     poll_default_sample_size: float = 1000.0      # used when a poll has no sample_size and none can be inferred
     poll_dirichlet_conc_floor: float = 10.0       # minimum Dirichlet concentration of the statewide share draws
@@ -204,8 +204,8 @@ def _to_pct(x: pd.Series) -> pd.Series:
 
 
 def projected_votes_from_electors(booth_results: pd.DataFrame, cfg: ModelConfig,
-                                 registered_electors: Optional[float] = None,
-                                 expected_turnout_rate: Optional[float] = None) -> pd.Series:
+                                registered_electors: Optional[float] = None,
+                                expected_turnout_rate: Optional[float] = None) -> pd.Series:
     """Booth-level projected FORMAL votes = registered electors x turnout x (1 - historical informal rate), spread over
     booths by their share of the last election's formal votes. Arguments default to cfg.registered_electors / cfg.expected_turnout_rate."""
     registered_electors = cfg.registered_electors if registered_electors is None else registered_electors
@@ -439,12 +439,21 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
     coords = {"booth": des["booth_names"], "year": des["years"], "obs": np.arange(N), "pm": parties[:Km], "party": parties}
     priors = beta_prior_table(cfg)
 
+    B = len(des["booth_names"])
     with pm.Model(coords=coords):
-        betas = []
+        #NEW SETUP FOR BETA HERE.
+        mu_betas = []
         for p in parties:
-            mu_b, sd_b, _lower_ignored = priors[p]                              # plain Normal: no truncation at 0
-            betas.append(pm.Normal(f"beta_{p}", mu=mu_b, sigma=sd_b))
-        beta_vec = pt.stack(betas)                                              # (K,)
+            mu_b, sd_b, _ = priors[p]
+            mu_betas.append(pm.Normal(f"mu_beta_{p}", mu=mu_b, sigma=sd_b))
+        mu_beta_vec = pt.stack(mu_betas) # Shape: (K,)
+        
+        sigma_beta = pm.HalfNormal("sigma_beta", sigma=0.20, dims="party") # Shape: (K,)
+        
+        beta_z = pm.Normal("beta_z", mu=0.0, sigma=1.0, dims=("booth", "party")) # Shape: (B, K)
+        
+        beta_matrix = pm.Deterministic("beta_matrix", mu_beta_vec[None, :] + beta_z * sigma_beta, dims=("booth", "party")) # Shape: (B, K)
+
         m = pm.Normal("m", mu=m0, sigma=cfg.m_prior_sd, dims="pm")
         sigma_alpha = pm.HalfNormal("sigma_alpha", sigma=cfg.sigma_alpha_sd / np.sqrt(2.0), dims="party")   # /sqrt2: log-ratio scale unchanged
         sigma_d = pm.LogNormal("sigma_d", mu=float(np.log(cfg.sigma_d_median) - 0.5 * np.log(2.0)), sigma=cfg.sigma_d_sdlog, dims="party")
@@ -464,10 +473,14 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
             d_steps.append(rho * d_steps[-1] + innov * sigma_d * d_z[t])
         d_t = pm.Deterministic("d_t", pt.stack(d_steps, axis=0), dims=("year", "party"))   # (T, K), ALL parties
         eps = pm.Deterministic("eps", eps_z * sigma_eps, dims=("obs", "party"))             # (N, K) all parties
-        bx = beta_vec[None, :] * des["x"][des["year_idx"]]                      # (N, K) state-swing effect
+        # Fetch each booth's unique beta vector relative to the observation index row
+        beta_obs = beta_matrix[des["booth_idx"]]                                # (N, K)
+        bx = beta_obs * des["x"][des["year_idx"]]                              # (N, K) localized state-swing effect
+        
         d_obs = d_t[des["year_idx"]]                                            # (N, K)
         m_full = pt.concatenate([m, pt.zeros((1,))])                            # reference party: m_K = 0
-        eta = m_full[None, :] + alpha_b[des["booth_idx"]] + bx + d_obs + eps    # (N, K): every party treated alike
+        eta = m_full[None, :] + alpha_b[des["booth_idx"]] + bx + d_obs + eps    # (N, K)
+
         pm.Multinomial("y_obs", n=n, p=pm.math.softmax(eta, axis=-1), observed=Y)
         idata = pm.sample(draws=cfg.draws, tune=cfg.tune, chains=cfg.chains, target_accept=cfg.target_accept,
                         random_seed=cfg.seed, return_inferencedata=True)
@@ -481,7 +494,9 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
         print(f"  mean sigma_d in divergent draws {sd[dv].mean():.3f} vs {sd.mean():.3f} overall "
             "(clustered at small values => tighten sigma_d_median / sigma_d_sdlog).")
     des.update(
-        draws={"beta": np.stack([_stack(idata, f"beta_{p}") for p in parties], axis=1),     # (D, K)
+        draws={"beta": np.stack([_stack(idata, f"mu_beta_{p}") for p in parties], axis=1),  # (D, K) global seat averages
+                "beta_matrix": _stack(idata, "beta_matrix"),                                  # (D, B, K) full local footprint
+
             "m": _stack(idata, "m"), "sigma_alpha": _stack(idata, "sigma_alpha"),
             "sigma_d": _stack(idata, "sigma_d"), "sigma_eps": _stack(idata, "sigma_eps"),
             "alpha": _stack(idata, "alpha_b"), "d": _stack(idata, "d_t"), "eps": _stack(idata, "eps"),
@@ -973,14 +988,14 @@ def predict_bayes(booths: pd.DataFrame, state_results: pd.DataFrame,
             "s6_mode": onp_mode, "s6_retain": np.asarray(retain_rec, dtype=float),
             "s7_seat_draws": seat_all, "s7_out_parties": np.array(out_parties),
             "meta": {"seat_name": cfg.seat_name, "party": cfg.party, "parties": parties, "out_parties": out_parties,
-                     "election_date": cfg.election_date, "prediction_date": cfg.prediction_date,
-                     "scenario_pct": [float(v) for v in cfg.scenario_pct], "poll_half_life_months": cfg.poll_half_life_months,
-                     "sigma_d_median": cfg.sigma_d_median, "sigma_d_sdlog": cfg.sigma_d_sdlog, "sigma_alpha_sd": cfg.sigma_alpha_sd,
-                     "sigma_eps_sd": cfg.sigma_eps_sd, "rho_beta": [cfg.rho_beta_a, cfg.rho_beta_b], "d_persist": cfg.d_persist,
-                     "m_prior_sd": cfg.m_prior_sd, "rhat_threshold": cfg.rhat_threshold, "ess_threshold": cfg.ess_threshold,
-                     "onp_layer": bool(cfg.onp_layer), "onp_state_denominator": bool(cfg.onp_state_denominator),
-                     "brian_mode": bool(cfg.brian_mode), "brian_onp_from_lnp": cfg.brian_onp_from_lnp,
-                     "brian_onp_from_alp": cfg.brian_onp_from_alp}})
+                    "election_date": cfg.election_date, "prediction_date": cfg.prediction_date,
+                    "scenario_pct": [float(v) for v in cfg.scenario_pct], "poll_half_life_months": cfg.poll_half_life_months,
+                    "sigma_d_median": cfg.sigma_d_median, "sigma_d_sdlog": cfg.sigma_d_sdlog, "sigma_alpha_sd": cfg.sigma_alpha_sd,
+                    "sigma_eps_sd": cfg.sigma_eps_sd, "rho_beta": [cfg.rho_beta_a, cfg.rho_beta_b], "d_persist": cfg.d_persist,
+                    "m_prior_sd": cfg.m_prior_sd, "rhat_threshold": cfg.rhat_threshold, "ess_threshold": cfg.ess_threshold,
+                    "onp_layer": bool(cfg.onp_layer), "onp_state_denominator": bool(cfg.onp_state_denominator),
+                    "brian_mode": bool(cfg.brian_mode), "brian_onp_from_lnp": cfg.brian_onp_from_lnp,
+                    "brian_onp_from_alp": cfg.brian_onp_from_alp}})
     return ModelOutput(
         params, booths_tbl, tide_tbl, fc, seat, 
         diagnostics=fit["diag"], 

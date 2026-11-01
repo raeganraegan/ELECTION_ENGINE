@@ -17,13 +17,14 @@ import json
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from ENKI_V3 import ModelConfig, ModelOutput, RunOptions
+from typing import Any, Dict, List, Optional, Sequence, Union, TYPE_CHECKING
+if TYPE_CHECKING:
+    from ENKI_V3 import ModelConfig, ModelOutput, RunOptions
 
 try:
     from adjustText import adjust_text
@@ -46,7 +47,7 @@ def _logit(p):
     return np.log(p / (1.0 - p))
 
 
-def check_booth_data(df: pd.DataFrame, cfg: ModelConfig) -> None:
+def check_booth_data(df: pd.DataFrame, cfg: "ModelConfig") -> None:
     """Warn (never raise) when the booth CSV does not reconcile. Rows are compared as formal votes
     (total - informal) vs the sum of every named column (ALP/LNP/GRN/IND/ONP). Only runs when an IND column exists,
     because without one OTHER is the remainder by design. Also flags duplicate booth-years and big year-on-year jumps in the seat total."""
@@ -84,7 +85,7 @@ def check_booth_data(df: pd.DataFrame, cfg: ModelConfig) -> None:
         print("-> Data check: booth CSV reconciles (rows sum to formal votes, no duplicates, no big total jumps).")
 
 
-def diagnose_sampler(idata, summ, label: str, cfg: Optional[ModelConfig] = None) -> int:
+def diagnose_sampler(idata, summ, label: str, cfg: Optional["ModelConfig"] = None) -> int:
     rh_max = cfg.rhat_threshold if cfg is not None else 1.01
     ess_min = cfg.ess_threshold if cfg is not None else 400.0
     divergences = int(idata.sample_stats["diverging"].sum())
@@ -462,7 +463,7 @@ def as_frame(v, name: str) -> pd.DataFrame:
     raise TypeError(f"{name}: expected a DataFrame, a CSV path, or records; got {type(v).__name__}.")
 
 
-def validate_inputs(cfg: ModelConfig, run: RunOptions) -> List[str]:
+def validate_inputs(cfg: "ModelConfig", run: "RunOptions") -> List[str]:
     """Hard errors are raised together; soft problems are returned as warnings."""
     err: List[str] = []
     warn: List[str] = []
@@ -551,48 +552,48 @@ def print_run_report(y, cfg, priors) -> None:
 # Layout coordinates are for the page-1 diagram (a 14 x 7.5 canvas); edges are (from, to, kind).
 PIPELINE_STEPS: List[Dict[str, Any]] = [
     dict(id="S0", name="Prep", pos=(2.0, 6.0),
-         what="counts -> shares; statewide log-swing",
-         eq="x_kt = ln S_kt - mean_t ln S_kt",
-         inputs="booth_results, state_results", outputs="x (T x K), S_hist",
-         trace=["s0_years", "s0_parties", "s0_state_pct", "s0_x", "s0_x_center"]),
+        what="counts -> shares; statewide log-swing",
+        eq="x_kt = ln S_kt - mean_t ln S_kt",
+        inputs="booth_results, state_results", outputs="x (T x K), S_hist",
+        trace=["s0_years", "s0_parties", "s0_state_pct", "s0_x", "s0_x_center"]),
     dict(id="S1", name="Fit", pos=(5.4, 6.0),
-         what="posterior of the multinomial-logit model",
-         eq="eta = m + alpha_b + beta*x + d_t + eps",
-         inputs="Y, x, priors", outputs="theta^(i), i = 1..D",
-         trace=["s1_beta", "s1_rho", "s1_sigma_d", "s1_sigma_alpha", "s1_sigma_eps", "s1_m", "s1_prior_beta", "s1_diag"]),
+        what="posterior of the multinomial-logit model",
+        eq="eta = m + alpha_b + beta*x + d_t + eps",
+        inputs="Y, x, priors", outputs="theta^(i), i = 1..D",
+        trace=["s1_beta", "s1_rho", "s1_sigma_d", "s1_sigma_alpha", "s1_sigma_eps", "s1_m", "s1_prior_beta", "s1_diag"]),
     dict(id="S2", name="Polls", pos=(2.0, 3.4),
-         what="weighted poll average + error budget -> statewide share draws",
+        what="weighted poll average + error budget -> statewide share draws",
          eq="S ~ Dir(conc * s_hat);  se^2 = se_poll^2 + house^2 + g^2 tau",
-         inputs="polls, dates, config", outputs="S^(i) (D x K)",
-         trace=["s2_se_parts", "s2_conc", "s2_central", "s2_central_onp", "s2_S_next", "s2_onp_state"]),
+        inputs="polls, dates, config", outputs="S^(i) (D x K)",
+        trace=["s2_se_parts", "s2_conc", "s2_central", "s2_central_onp", "s2_S_next", "s2_onp_state"]),
     dict(id="S3", name="Tide", pos=(5.4, 3.4),
-         what="statewide swing + AR(1) tide -> party-level shift",
-         eq="lin = beta*(ln S - c) + rho*d_T + sqrt(1-rho^2)*sigma_d*z",
-         inputs="theta, S", outputs="lin (D x K)",
-         trace=["s3_x_next", "s3_bx", "s3_d_next", "s3_lin", "s3_d_hist_mean", "s3_d_hist_p05", "s3_d_hist_p95", "s3_bx_hist"]),
+        what="statewide swing + AR(1) tide -> party-level shift",
+        eq="lin = beta*(ln S - c) + rho*d_T + sqrt(1-rho^2)*sigma_d*z",
+        inputs="theta, S", outputs="lin (D x K)",
+        trace=["s3_x_next", "s3_bx", "s3_d_next", "s3_lin", "s3_d_hist_mean", "s3_d_hist_p05", "s3_d_hist_p95", "s3_bx_hist"]),
     dict(id="S4", name="Booths", pos=(8.8, 3.4),
-         what="booth-level shares (softmax)",
-         eq="p_b = softmax(m + alpha_b + lin + eps_b)",
-         inputs="lin, alpha, eps", outputs="p_b (D x B x K)",
-         trace=["s4_p_pre", "s4_booths", "s4_last_party_share"]),
+        what="booth-level shares (softmax)",
+        eq="p_b = softmax(m + alpha_b + lin + eps_b)",
+        inputs="lin, alpha, eps", outputs="p_b (D x B x K)",
+        trace=["s4_p_pre", "s4_booths", "s4_last_party_share"]),
     dict(id="S5", name="Volumes", pos=(2.0, 0.9),
-         what="formal votes per booth",
+        what="formal votes per booth",
          eq="V ~ Mult(T', Dir(kappa * softmax(a + tau' early)))",
-         inputs="booth history | electors | projections", outputs="V (D x B)",
-         trace=["s5_V", "s5_hist_totals", "s5_last_n", "s5_mode"]),
+        inputs="booth history | electors | projections", outputs="V (D x B)",
+        trace=["s5_V", "s5_hist_totals", "s5_last_n", "s5_mode"]),
     dict(id="S6", name="ONP", pos=(12.2, 3.4),
-         what="One Nation entry / vote transfer (mass-conserving)",
-         eq="p'_k = (1-f_k) p_k ;  p'_ONP = sum_k f_k p_k",
-         inputs="p_b, f or S_ONP", outputs="p'_b (D x B x K+1)",
-         trace=["s6_mode", "s6_retain"]),
+        what="One Nation entry / vote transfer (mass-conserving)",
+        eq="p'_k = (1-f_k) p_k ;  p'_ONP = sum_k f_k p_k",
+        inputs="p_b, f or S_ONP", outputs="p'_b (D x B x K+1)",
+        trace=["s6_mode", "s6_retain"]),
     dict(id="S7", name="Seat", pos=(8.8, 0.9),
-         what="volume-weighted seat shares and percentiles",
-         eq="s_k = sum_b V_b p'_kb / sum_b V_b",
-         inputs="V, p'_b", outputs="seat shares (D x K+1)",
-         trace=["s7_seat_draws", "s7_out_parties"]),
+        what="volume-weighted seat shares and percentiles",
+        eq="s_k = sum_b V_b p'_kb / sum_b V_b",
+        inputs="V, p'_b", outputs="seat shares (D x K+1)",
+        trace=["s7_seat_draws", "s7_out_parties"]),
 ]
 PIPELINE_EDGES = [("S0", "S1", "solid"), ("S1", "S3", "solid"), ("S2", "S3", "solid"), ("S3", "S4", "solid"),
-                  ("S4", "S6", "solid"), ("S6", "S7", "solid"), ("S5", "S7", "solid"), ("S0", "S5", "dashed")]
+                ("S4", "S6", "solid"), ("S6", "S7", "solid"), ("S5", "S7", "solid"), ("S0", "S5", "dashed")]
 
 
 def check_trace(trace: Optional[dict]) -> List[str]:
