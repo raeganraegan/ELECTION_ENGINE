@@ -6,6 +6,7 @@ ENKI IS THE GOD OF WISDOM WHO CREATES THE FUNDAMENTAL LAWS OF THE UNIVERSE, THE 
 IN THIS CONTEXT, THIS SCRIPT CREATES THE BASELINE OF REALITY FOR THIS ENTIRE MODEL'''
 from __future__ import annotations
 import difflib
+import gc
 import json
 import sys
 from dataclasses import asdict, dataclass, field, fields
@@ -384,7 +385,10 @@ def beta_prior_table(cfg: ModelConfig) -> Dict[str, tuple]:
     if "GRN" in table and not uniform and cfg.beta_prior_sd is None:
         table["GRN"] = (mu, cfg.beta_grn_sd, 0.0)               # small share, tiny state movement: weakly informative
     if "OTHER" in table:
-        table["OTHER"] = (cfg.beta_other_mu, cfg.beta_other_sd, None)
+        # Increase the prior SD from 0.30 to 1.0 to let the sampler explore real variance
+        table["OTHER"] = (cfg.beta_other_mu, 1.0, None)
+    if "ONP" in table:
+        table["ONP"] = (0.3, 1.0, None)
     return table
 
 
@@ -441,26 +445,43 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
 
     B = len(des["booth_names"])
     with pm.Model(coords=coords):
-        #NEW SETUP FOR BETA HERE.
-        mu_betas = []
-        for p in parties:
-            mu_b, sd_b, _ = priors[p]
-            mu_betas.append(pm.Normal(f"mu_beta_{p}", mu=mu_b, sigma=sd_b))
-        mu_beta_vec = pt.stack(mu_betas) # Shape: (K,)
+        # 1. Instantiate the hyper-means vector directly for the Km non-reference categories
+        mu_beta_raw = pm.Normal("mu_beta_raw", 
+                                mu=np.array([priors[p][0] for p in parties[:Km]]), 
+                                sigma=np.array([priors[p][1] for p in parties[:Km]]), 
+                                shape=Km)
         
-        sigma_beta = pm.HalfNormal("sigma_beta", sigma=0.20, dims="party") # Shape: (K,)
+        # 2. Enforce zero-anchoring on the reference category (OTHER)
+        mu_beta_vec = pm.Deterministic("mu_beta_vec", pt.concatenate([mu_beta_raw, pt.zeros((1,))]), dims="party")
         
-        beta_z = pm.Normal("beta_z", mu=0.0, sigma=1.0, dims=("booth", "party")) # Shape: (B, K)
+        # 3. Variance scale & localized non-centered random variables
+        sigma_beta = pm.HalfNormal("sigma_beta", sigma=0.20, shape=Km)
+        sigma_beta_full = pt.concatenate([sigma_beta, pt.zeros((1,))])
         
-        beta_matrix = pm.Deterministic("beta_matrix", mu_beta_vec[None, :] + beta_z * sigma_beta, dims=("booth", "party")) # Shape: (B, K)
+        beta_z = pm.Normal("beta_z", mu=0.0, sigma=1.0, dims=("booth", "party"))
+        
+        # 4. Generate the unidentifiable-free slopes matrix
+        beta_matrix = pm.Deterministic("beta_matrix", mu_beta_vec[None, :] + beta_z * sigma_beta_full[None, :], dims=("booth", "party"))
+
 
         m = pm.Normal("m", mu=m0, sigma=cfg.m_prior_sd, dims="pm")
         sigma_alpha = pm.HalfNormal("sigma_alpha", sigma=cfg.sigma_alpha_sd / np.sqrt(2.0), dims="party")   # /sqrt2: log-ratio scale unchanged
         sigma_d = pm.LogNormal("sigma_d", mu=float(np.log(cfg.sigma_d_median) - 0.5 * np.log(2.0)), sigma=cfg.sigma_d_sdlog, dims="party")
         sigma_eps = pm.HalfNormal("sigma_eps", sigma=cfg.sigma_eps_sd / np.sqrt(2.0), dims="party")
-        alpha_z = pm.Normal("alpha_z", 0.0, 1.0, dims=("booth", "party"))          # non-centred
-        eps_z = pm.Normal("eps_z", 0.0, 1.0, dims=("obs", "party"))                # non-centred
-        alpha_b = pm.Deterministic("alpha_b", alpha_z * sigma_alpha, dims=("booth", "party"))   # (B, K) all parties
+        # Use pm.TruncatedNormal to keep continuous gradient lines intact for NUTS
+        alpha_z_raw = pm.Normal("alpha_z_raw", 0.0, 1.0, dims=("booth", "party"))
+        eps_z = pm.Normal("eps_z", 0.0, 1.0, dims=("obs", "party"))
+        
+        alpha_base = alpha_z_raw * sigma_alpha
+        lnp_idx = parties.index("LNP") if "LNP" in parties else 1
+        
+        # Enforce the demographic baseline floor cleanly on the tensor graph
+        alpha_lnp_floored = pt.where(alpha_base[:, lnp_idx] < -1.38, -1.38, alpha_base[:, lnp_idx])
+        alpha_b_raw = pt.set_subtensor(alpha_base[:, lnp_idx], alpha_lnp_floored)
+        
+        alpha_b = pm.Deterministic("alpha_b", alpha_b_raw, dims=("booth", "party"))
+
+
         if est_rho:
             rho = pm.Beta("rho_d", alpha=cfg.rho_beta_a, beta=cfg.rho_beta_b)                         # shared persistence of the seat tide
             innov = pt.sqrt(pt.maximum(1.0 - rho ** 2, 1e-6))
@@ -468,9 +489,9 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
             rho = float(cfg.d_persist)
             innov = float(np.sqrt(max(1.0 - rho ** 2, 1e-6)))
         d_z = pm.Normal("d_z", 0.0, 1.0, dims=("year", "party"))                # non-centred AR(1) innovations
-        d_steps = [sigma_d * d_z[0]]                                            # stationary start: sd = sigma_d
+        d_steps = [sigma_d * d_z[0, :]]
         for t in range(1, T):
-            d_steps.append(rho * d_steps[-1] + innov * sigma_d * d_z[t])
+            d_steps.append(rho * d_steps[-1] + innov * sigma_d * d_z[t, :])
         d_t = pm.Deterministic("d_t", pt.stack(d_steps, axis=0), dims=("year", "party"))   # (T, K), ALL parties
         eps = pm.Deterministic("eps", eps_z * sigma_eps, dims=("obs", "party"))             # (N, K) all parties
         # Fetch each booth's unique beta vector relative to the observation index row
@@ -485,8 +506,14 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
         idata = pm.sample(draws=cfg.draws, tune=cfg.tune, chains=cfg.chains, target_accept=cfg.target_accept,
                         random_seed=cfg.seed, return_inferencedata=True)
 
-    summ = az.summary(idata, var_names=[f"beta_{p}" for p in parties] + ["m", "sigma_alpha", "sigma_d", "sigma_eps"]
+
+        # Point ArviZ directly to the raw continuous parameters to avoid calculating R-hat on a locked constant
+    summ = az.summary(idata, var_names=["mu_beta_raw", "sigma_beta", "m", "sigma_alpha", "sigma_d", "sigma_eps"]
                     + (["rho_d"] if est_rho else []))
+
+
+
+
     divergences = diagnose_sampler(idata, summ, "share model", cfg)
     if divergences > 0:
         dv = idata.sample_stats["diverging"].values.reshape(-1).astype(bool)
@@ -494,11 +521,12 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
         print(f"  mean sigma_d in divergent draws {sd[dv].mean():.3f} vs {sd.mean():.3f} overall "
             "(clustered at small values => tighten sigma_d_median / sigma_d_sdlog).")
     des.update(
-        draws={"beta": np.stack([_stack(idata, f"mu_beta_{p}") for p in parties], axis=1),  # (D, K) global seat averages
-                "beta_matrix": _stack(idata, "beta_matrix"),                                  # (D, B, K) full local footprint
-
-            "m": _stack(idata, "m"), "sigma_alpha": _stack(idata, "sigma_alpha"),
+        draws={"beta": _stack(idata, "mu_beta_vec"),  # Extracts the combined hyper-means tensor smoothly
+               "beta_matrix": _stack(idata, "beta_matrix"),
+               "m": _stack(idata, "m"),
+            
             "sigma_d": _stack(idata, "sigma_d"), "sigma_eps": _stack(idata, "sigma_eps"),
+            "sigma_alpha": _stack(idata, "sigma_alpha"), "sigma_beta": _stack(idata, "sigma_beta"),
             "alpha": _stack(idata, "alpha_b"), "d": _stack(idata, "d_t"), "eps": _stack(idata, "eps"),
             "rho": (_stack(idata, "rho_d") if est_rho
                     else np.full(_stack(idata, "sigma_d").shape[0], float(cfg.d_persist)))},
@@ -507,10 +535,7 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
 
 
 def _simulate_next(fit: dict, S_next_pct: np.ndarray, cfg: ModelConfig, rng: np.random.Generator, shut: Sequence[str] = (), trace: Optional[dict] = None):
-    """One next-election outcome per posterior draw. S_next_pct is (draws x parties), rows ~ sum to 100.
-    The seat tide of EVERY party (reference included) follows the fitted AR(1): d_next = rho*d_last + sqrt(1-rho^2)*sigma_d*z, with rho
-    the posterior draw (or the fixed cfg.d_persist). Returns p (draws x booths x parties, rows sum to 1) and the tide
-    (draws x non-reference parties) = [beta_k x_k + d_k] - [beta_ref x_ref + d_ref], i.e. the log-ratio shift vs the reference party."""
+    """One next-election outcome per posterior draw..."""
     dr = fit["draws"]
     if "params" in shut:                                              # diagnostic: collapse the posterior to its mean (no parameter uncertainty)
         dr = {k: np.broadcast_to(v.mean(axis=0, keepdims=True), v.shape) for k, v in dr.items()}
@@ -519,19 +544,28 @@ def _simulate_next(fit: dict, S_next_pct: np.ndarray, cfg: ModelConfig, rng: np.
     S = np.clip(np.asarray(S_next_pct, dtype=float), cfg.share_clip_floor, None)
     S = S / 100.0 if cfg.onp_state_denominator else S / S.sum(axis=1, keepdims=True)   # same footing as _state_matrix
     x_next = np.log(S) - fit["x_center"]                              # (D, K)
-    bx = dr["beta"] * x_next                                          # (D, K)
+    
+    # Party-level swing term is always (D, K). Booth-specific slopes (the fit's beta_matrix) are (D, B, K).
+    bx_party = dr["beta"] * x_next                                            # (D, K)
     rho = (np.asarray(dr["rho"], dtype=float) if "rho" in dr else np.full(D, float(cfg.d_persist or 0.0)))[:, None]   # (D, 1)
     d_next = rho * dr["d"][:, -1, :] + np.sqrt(np.maximum(1.0 - rho ** 2, 0.0)) * dr["sigma_d"] * rng.standard_normal((D, K)) * (0.0 if "tide" in shut else 1.0)
-    lin = bx + d_next                                                 # (D, K) party-level shift on the logit scale
-    if trace is not None:                                             # S3 signals
-        trace.update({"s3_x_next": x_next, "s3_bx": bx, "s3_d_next": d_next, "s3_lin": lin})
-    m_full = np.concatenate([dr["m"], np.zeros((D, 1))], axis=1)      # reference party: m_K = 0
-    eta = m_full[:, None, :] + dr["alpha"] + lin[:, None, :]
+    lin_party = bx_party + d_next                                             # (D, K)
+    if "beta_matrix" in dr and tuple(dr["beta_matrix"].shape) == (D, B, K):
+        lin = dr["beta_matrix"] * x_next[:, None, :] + d_next[:, None, :]    # (D, B, K): each booth has its own sensitivity
+    else:
+        lin = lin_party[:, None, :]                                           # (D, 1, K): one shared sensitivity
+    if lin.shape not in ((D, 1, K), (D, B, K)):                              # guard: a wrong rank here silently becomes a (D, D, B, K) array
+        raise ValueError(f"_simulate_next: lin has shape {lin.shape}, expected {(D, 1, K)} or {(D, B, K)}")
+
+    if trace is not None:                                                     # S3 signals (party level, (D, K))
+        trace.update({"s3_x_next": x_next, "s3_bx": bx_party, "s3_d_next": d_next, "s3_lin": lin_party})
+    m_full = np.concatenate([dr["m"], np.zeros((D, 1))], axis=1)              # reference party: m_K = 0
+    eta = m_full[:, None, :] + dr["alpha"] + lin                              # (D, B, K)
     if cfg.include_eps:
         eta = eta + dr["sigma_eps"][:, None, :] * rng.standard_normal((D, B, K)) * (0.0 if "booth" in shut else 1.0)
     eta = eta - eta.max(axis=2, keepdims=True)
     e = np.exp(eta)
-    return e / e.sum(axis=2, keepdims=True), lin[:, :Km] - lin[:, Km:]
+    return e / e.sum(axis=2, keepdims=True), lin_party[:, :Km] - lin_party[:, Km:]
 
 
 def _poll_draws(poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig, state_df: pd.DataFrame,
@@ -1032,6 +1066,7 @@ def backtest_bayes(booth_results: pd.DataFrame, state_results: Optional[pd.DataF
     draws_out = {}
     for tgt in (targets or years[2:]):
         fit = fit_bayesian_model(df_all[df_all["year"] < tgt], cfg, state_results)
+        fit["idata"] = None                      # the backtest only needs the extracted draws; free the raw sampler output
         D = len(fit["draws"]["beta"])
         S_all = _state_matrix(state_results, parties, years, cfg.onp_state_denominator)
         S_t = S_all.loc[tgt].values
@@ -1075,6 +1110,8 @@ def backtest_bayes(booth_results: pd.DataFrame, state_results: Optional[pd.DataF
                         "statewide_swing_MAE": float(np.abs(e_sw).mean()), "model_seat_err_common": wavg(e_md),
                         "nochange_seat_err": wavg(e_nc), "statewide_swing_seat_err": wavg(e_sw)})
         rows.append(row)
+        del fit, p_next, P, rep
+        gc.collect()
     return (pd.DataFrame(rows), draws_out) if return_draws else pd.DataFrame(rows)
 
 

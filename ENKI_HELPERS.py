@@ -525,6 +525,7 @@ def validate_inputs(cfg: "ModelConfig", run: "RunOptions") -> List[str]:
     return warn
 
 
+
 def print_run_report(y, cfg, priors) -> None:
     pd.set_option("display.width", 160)
     for w in y.warnings:
