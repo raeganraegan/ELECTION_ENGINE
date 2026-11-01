@@ -23,6 +23,8 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from ENKI_V3 import ModelConfig, ModelOutput, RunOptions
+
 try:
     from adjustText import adjust_text
 except ImportError:                                   # labels just overlap a little more without it

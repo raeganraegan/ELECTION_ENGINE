@@ -1,7 +1,7 @@
 import argparse
 import ast
 from INANNA_V2 import main as INANNA
-from ENKI_V2 import main as ENKI
+from ENKI_V3 import main as ENKI
 
 def main():
     parser = argparse.ArgumentParser(description="Master Engine Runner")
