@@ -2,12 +2,14 @@
 ENKI IS THE GOD OF WISDOM WHO CREATES THE FUNDAMENTAL LAWS OF THE UNIVERSE, THE BASELINE REALITY.
 IN THIS CONTEXT, THIS SCRIPT CREATES THE BASELINE OF REALITY FOR THIS ENTIRE MODEL'''
 from __future__ import annotations
+import difflib
 import json
 import re
-from dataclasses import dataclass
+import sys
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -85,19 +87,63 @@ class ModelConfig:
     # Hence you need to make your own assumptions, plug them in here.
     onp_layer: bool = True                        # polls table has an ONP column -> model One Nation as a separate ENTRANT
     onp_state_denominator: bool = True            # keep ONP in the statewide denominator (history AND polls) so a 20% ONP poll does not inflate the other parties; ONP still gets no seat share unless onp_layer
-    sigma_eps_sd: float = 0.3                     # HalfNormal scale of booth-election noise (was hard-coded); lower it if booth coverage sits well above 90%
+    sigma_eps_sd: float = 0.15                     # HalfNormal scale of booth-election noise (was hard-coded); lower it if booth coverage sits well above 90%
     run_attribution: bool = True                  # report which uncertainty layer drives the width of the seat band
     #SET BELOW TO 1.4 FOR REGIONAL/OUTER METRO SEATS, LOWER FOR LOWER ONE NATION SHARE.
     onp_seat_ratio_median: float = 0.65            # seat ONP share / statewide ONP share (East Hills 1999: 10.7 / 6.4)
     onp_seat_ratio_sdlog: float = 0.5
     onp_max_seat_share: float = 1.0             # cap on the seat-wide ONP share
+
+    #NOTE: BrianMode (toggle). Replaces the statewide-ONP x seat-ratio entry with a fixed vote-transfer assumption:
+    # ONP takes brian_onp_from_lnp of the LNP vote and brian_onp_from_alp of the ALP vote, booth by booth, AFTER the
+    # fitted model has produced its ex-ONP booth shares. GRN / OTHER are untouched, so every booth still sums to 100%.
+    # It does not need an ONP poll column. Backtests are unaffected (they never apply the ONP layer).
+    brian_mode: bool = False
+    brian_onp_from_lnp: float = 0.20              # share of the LNP vote that goes to ONP
+    brian_onp_from_alp: float = 0.05              # share of the ALP vote that goes to ONP
     
     #NOTE: Below is to distribute KNOWN number of electors (since now I know!)
     #Note number of electors does not equal the number of voters.
     #Turnout matters.
     registered_electors: Optional[float] = None       # Total registered electors from NSWEC
     expected_turnout_rate: float = 0.90               # Expected voter turnout rate (e.g. 90%)
-    
+    informal_rate_fallback: float = 0.04              # informal-vote rate used ONLY if the booth file has no votes to infer one from
+
+    #NOTE: everything below used to be a literal buried inside the model. Defaults reproduce the old behaviour exactly.
+    # --- share-model priors
+    beta_data_mu: float = 0.3                     # beta_preset="data": ALP/LNP/GRN prior mean
+    beta_data_sd: float = 0.30                    # beta_preset="data": prior sd
+    beta_uniform_mu: float = 1.0                  # beta_preset="uniform": prior mean
+    beta_uniform_sd: float = 0.15                 # beta_preset="uniform": prior sd
+    beta_grn_sd: float = 0.50                     # GRN prior sd under the "data" preset (small share, weakly informative)
+    beta_other_mu: float = 0.0                    # OTHER is decoupled from the statewide swing
+    beta_other_sd: float = 0.30
+    m_prior_sd: float = 1.0                       # sd of the prior on the party intercepts m_k around their empirical log-ratio
+    rho_beta_a: float = 2.0                       # rho_d ~ Beta(a, b), used when d_persist is None
+    rho_beta_b: float = 2.0
+    # --- volume-model priors and sampler
+    volume_draws: Optional[int] = None            # None: same as draws
+    volume_tune_floor: int = 3000                 # the volume model always tunes for at least this many steps
+    vol_sigma_a_sd: float = 1.5                   # HalfNormal scale of the booth-size spread
+    vol_tau_sd: float = 0.5                       # Normal sd of the early-vote log-share steps
+    vol_kappa_alpha: float = 2.0                  # kappa ~ Gamma(alpha, beta) (mean alpha/beta = 400 by default)
+    vol_kappa_beta: float = 0.005
+    election_cycle_years: float = 4.0             # years between elections (sets how many cycles ahead the target is)
+    backtest_volume_sims: int = 4000              # draws used inside backtest_volume
+    # --- statewide poll layer
+    time_horizon_gamma: float = 3.0               # extra poll sd (pts) = gamma * sqrt(years to election)
+    poll_z: float = 1.96                          # z behind the poll margin of error AND the low/high -> se conversion
+    poll_default_sample_size: float = 1000.0      # used when a poll has no sample_size and none can be inferred
+    poll_dirichlet_conc_floor: float = 10.0       # minimum Dirichlet concentration of the statewide share draws
+    poll_sum_warn: float = 102.0                  # warn when poll shares incl. ONP sum to more than this
+    share_clip_floor: float = 1e-3                # statewide shares are clipped to at least this (%), to keep logs finite
+    # --- diagnostics / bookkeeping
+    rhat_threshold: float = 1.01                  # sampler warning thresholds
+    ess_threshold: float = 400.0
+    data_check_jump_threshold: float = 0.15       # flag a year-on-year change in the seat formal total bigger than this
+    attribution_seed_offset: int = 101            # attribution re-simulation seed = seed + this
+    backtest_poll_house_sd: float = 0.0           # the backtest uses ACTUAL statewide shares, so house error is off by default
+
 @dataclass
 class PollInput:
     central: float
@@ -159,27 +205,32 @@ def combine_parties(polls: pd.DataFrame, groups: Dict[str, Sequence[str]]) -> pd
         p[new] = p[[c for c in cols if c in p.columns]].fillna(0).sum(axis=1)
     return p
 
-def projected_votes_from_electors(booth_results: pd.DataFrame, cfg: ModelConfig, 
-                                 registered_electors: float, 
-                                 expected_turnout_rate: float = 0.90) -> pd.Series:
-
+def projected_votes_from_electors(booth_results: pd.DataFrame, cfg: ModelConfig,
+                                 registered_electors: Optional[float] = None,
+                                 expected_turnout_rate: Optional[float] = None) -> pd.Series:
+    """Booth-level projected FORMAL votes = registered electors x turnout x (1 - historical informal rate), spread over
+    booths by their share of the last election's formal votes. Arguments default to cfg.registered_electors / cfg.expected_turnout_rate."""
+    registered_electors = cfg.registered_electors if registered_electors is None else registered_electors
+    expected_turnout_rate = cfg.expected_turnout_rate if expected_turnout_rate is None else expected_turnout_rate
+    if registered_electors is None:
+        raise ValueError("registered_electors is required (set cfg.registered_electors).")
     df = prepare_bayes_data(booth_results, cfg)
-    
+
     # 1. Infer the historical informal rate directly from past data across the seat
-    total_votes_all = booth_results["total_votes"].sum()
-    informal_votes_all = booth_results["informal_votes"].sum()
-    historical_informal_rate = informal_votes_all / total_votes_all if total_votes_all > 0 else 0.04
-    
+    total_votes_all = pd.to_numeric(booth_results["total_votes"].astype(str).str.replace(",", ""), errors="coerce").sum()
+    informal_votes_all = pd.to_numeric(booth_results["informal_votes"].astype(str).str.replace(",", ""), errors="coerce").sum()
+    historical_informal_rate = informal_votes_all / total_votes_all if total_votes_all > 0 else cfg.informal_rate_fallback
+
     # 2. Get the latest election year booth distribution
     latest_year = int(df["year"].max())
     latest_df = df[df["year"] == latest_year].set_index("booth")
-    
+
     # Each booth's share of formal votes at the last election
     booth_shares = latest_df["n"] / latest_df["n"].sum()
-    
+
     # 3. Calculate total formal votes using registered electors, turnout, and the inferred informal rate
     total_formal = registered_electors * expected_turnout_rate * (1.0 - historical_informal_rate)
-    
+
     # 4. Distribute across booths by historical ratio
     return booth_shares * total_formal
 
@@ -267,7 +318,7 @@ def _check_booth_data(df: pd.DataFrame, cfg: ModelConfig) -> None:
         issues.append(f"{dup} duplicate booth-year row(s); they are summed together, which double counts if they are accidental repeats.")
     tot = w.groupby("year")["_n"].sum().sort_index()
     jump = tot.pct_change().dropna()
-    for yr, ch in jump[jump.abs() > 0.15].items():
+    for yr, ch in jump[jump.abs() > cfg.data_check_jump_threshold].items():
         issues.append(f"Seat formal total moves {100 * ch:+.0f}% into {int(yr)} ({int(tot.loc[yr]):,} votes); "
                       "check for missing booths or vote types (postal, iVote, absent).")
     if issues:
@@ -350,16 +401,16 @@ def beta_prior_table(cfg: ModelConfig) -> Dict[str, tuple]:
     if cfg.beta_priors:
         return {p: tuple(cfg.beta_priors[p]) for p in cfg.parties}
     uniform = cfg.beta_preset == "uniform"
-    mu, sd = (1.0, 0.15) if uniform else (0.3, 0.30)
+    mu, sd = (cfg.beta_uniform_mu, cfg.beta_uniform_sd) if uniform else (cfg.beta_data_mu, cfg.beta_data_sd)
     if cfg.beta_g is not None:
         mu = cfg.beta_g
     if cfg.beta_prior_sd is not None:
         sd = cfg.beta_prior_sd
     table = {p: (mu, sd, 0.0) for p in cfg.parties}
     if "GRN" in table and not uniform and cfg.beta_prior_sd is None:
-        table["GRN"] = (mu, 0.50, 0.0)               # small share, tiny state movement: weakly informative
+        table["GRN"] = (mu, cfg.beta_grn_sd, 0.0)               # small share, tiny state movement: weakly informative
     if "OTHER" in table:
-        table["OTHER"] = (0.0, 0.30, None)
+        table["OTHER"] = (cfg.beta_other_mu, cfg.beta_other_sd, None)
     return table
 
 
@@ -392,9 +443,11 @@ def _stack(idata, name: str) -> np.ndarray:
     return np.moveaxis(arr, -1, 0)
 
 
-def _diagnose(idata, summ, label: str) -> int:
+def _diagnose(idata, summ, label: str, cfg: Optional[ModelConfig] = None) -> int:
+    rh_max = cfg.rhat_threshold if cfg is not None else 1.01
+    ess_min = cfg.ess_threshold if cfg is not None else 400.0
     divergences = int(idata.sample_stats["diverging"].sum())
-    if divergences > 0 or (summ["r_hat"] > 1.01).any() or (summ["ess_bulk"] < 400).any():
+    if divergences > 0 or (summ["r_hat"] > rh_max).any() or (summ["ess_bulk"] < ess_min).any():
         print(f"WARNING [{label}]: sampler diagnostics look poor (divergences={divergences}, "
             f"max r_hat={summ['r_hat'].max():.3f}, min ESS={summ['ess_bulk'].min():.0f}). "
             "Do not trust the forecast until this is resolved.")
@@ -427,7 +480,7 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
             mu_b, sd_b, _lower_ignored = priors[p]                              # plain Normal: no truncation at 0
             betas.append(pm.Normal(f"beta_{p}", mu=mu_b, sigma=sd_b))
         beta_vec = pt.stack(betas)                                              # (K,)
-        m = pm.Normal("m", mu=m0, sigma=1.0, dims="pm")
+        m = pm.Normal("m", mu=m0, sigma=cfg.m_prior_sd, dims="pm")
         sigma_alpha = pm.HalfNormal("sigma_alpha", sigma=cfg.sigma_alpha_sd / np.sqrt(2.0), dims="party")   # /sqrt2: log-ratio scale unchanged
         sigma_d = pm.LogNormal("sigma_d", mu=float(np.log(cfg.sigma_d_median) - 0.5 * np.log(2.0)), sigma=cfg.sigma_d_sdlog, dims="party")
         sigma_eps = pm.HalfNormal("sigma_eps", sigma=cfg.sigma_eps_sd / np.sqrt(2.0), dims="party")
@@ -435,7 +488,7 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
         eps_z = pm.Normal("eps_z", 0.0, 1.0, dims=("obs", "party"))                # non-centred
         alpha_b = pm.Deterministic("alpha_b", alpha_z * sigma_alpha, dims=("booth", "party"))   # (B, K) all parties
         if est_rho:
-            rho = pm.Beta("rho_d", alpha=2.0, beta=2.0)                         # shared persistence of the seat tide
+            rho = pm.Beta("rho_d", alpha=cfg.rho_beta_a, beta=cfg.rho_beta_b)                         # shared persistence of the seat tide
             innov = pt.sqrt(pt.maximum(1.0 - rho ** 2, 1e-6))
         else:
             rho = float(cfg.d_persist)
@@ -456,7 +509,7 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
 
     summ = az.summary(idata, var_names=[f"beta_{p}" for p in parties] + ["m", "sigma_alpha", "sigma_d", "sigma_eps"]
                     + (["rho_d"] if est_rho else []))
-    divergences = _diagnose(idata, summ, "share model")
+    divergences = _diagnose(idata, summ, "share model", cfg)
     if divergences > 0:
         dv = idata.sample_stats["diverging"].values.reshape(-1).astype(bool)
         sd = idata.posterior["sigma_d"].values.reshape(dv.size, -1)
@@ -483,7 +536,7 @@ def _simulate_next(fit: dict, S_next_pct: np.ndarray, cfg: ModelConfig, rng: np.
         dr = {k: np.broadcast_to(v.mean(axis=0, keepdims=True), v.shape) for k, v in dr.items()}
     D, B, K = dr["alpha"].shape
     Km = K - 1
-    S = np.clip(np.asarray(S_next_pct, dtype=float), 1e-3, None)
+    S = np.clip(np.asarray(S_next_pct, dtype=float), cfg.share_clip_floor, None)
     S = S / 100.0 if cfg.onp_state_denominator else S / S.sum(axis=1, keepdims=True)   # same footing as _state_matrix
     x_next = np.log(S) - fit["x_center"]                              # (D, K)
     bx = dr["beta"] * x_next                                          # (D, K)
@@ -511,12 +564,14 @@ def _poll_draws(poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig, state_df
         miss = [p for p in parties if p not in poll.columns]
         if miss:
             raise ValueError(f"Poll table needs a column for every modelled party; missing {miss}")
-        summ = {p: poll_summary(poll, p, cfg.poll_half_life_months, cfg.poll_as_of, cfg.poll_moe) for p in parties}
+        summ = {p: poll_summary(poll, p, cfg.poll_half_life_months, cfg.poll_as_of, cfg.poll_moe,
+                            cfg.poll_z, cfg.poll_default_sample_size) for p in parties}
         central = np.array([summ[p].central for p in parties], dtype=float)
         target = summ[cfg.party]
         if not cfg.onp_layer and not cfg.onp_state_denominator and "ONP" in poll.columns and "ONP" not in parties:
             try:
-                onp_c = float(poll_summary(poll, "ONP", cfg.poll_half_life_months, cfg.poll_as_of, cfg.poll_moe).central)
+                onp_c = float(poll_summary(poll, "ONP", cfg.poll_half_life_months, cfg.poll_as_of, cfg.poll_moe,
+                            cfg.poll_z, cfg.poll_default_sample_size).central)
             except ValueError:
                 onp_c = 0.0
             if onp_c > 0.5:
@@ -528,7 +583,8 @@ def _poll_draws(poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig, state_df
                       f"(+{without - with_onp:.1f} pts inflation). Seat forecasts inherit this.")
         if (cfg.onp_layer or cfg.onp_state_denominator) and "ONP" in poll.columns and "ONP" not in parties:
             try:
-                onp_central = float(poll_summary(poll, "ONP", cfg.poll_half_life_months, cfg.poll_as_of, cfg.poll_moe).central)
+                onp_central = float(poll_summary(poll, "ONP", cfg.poll_half_life_months, cfg.poll_as_of, cfg.poll_moe,
+                            cfg.poll_z, cfg.poll_default_sample_size).central)
             except ValueError:
                 onp_central = None
     else:
@@ -541,7 +597,7 @@ def _poll_draws(poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig, state_df
 
     if onp_central is not None:
         full = np.append(central, onp_central)
-        if full.sum() > 102.0 and cfg.verbose:
+        if full.sum() > cfg.poll_sum_warn and cfg.verbose:
             print(f"WARNING: poll shares incl. ONP sum to {full.sum():.1f}%. With an ONP column, OTHER must EXCLUDE ONP.")
         full = 100.0 * full / full.sum()
         central, onp_central = full[:-1], float(full[-1])
@@ -552,12 +608,12 @@ def _poll_draws(poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig, state_df
         central = 100.0 * central / central.sum()
         if cfg.verbose and isinstance(poll, pd.DataFrame) and "ONP" not in poll.columns and cfg.onp_layer:
             print("NOTE: polls have no ONP column, so One Nation is inside OTHER and is NOT modelled as a separate entrant.")
-    se_poll = (target.high - target.low) / (2 * 1.96)
+    se_poll = (target.high - target.low) / (2 * cfg.poll_z)
 
-    h_sd = get_time_horizon_sd(cfg.prediction_date, cfg.election_date)
+    h_sd = get_time_horizon_sd(cfg.prediction_date, cfg.election_date, cfg.time_horizon_gamma)
     se = np.sqrt(se_poll ** 2 + cfg.poll_house_sd ** 2 + h_sd ** 2) / 100.0
     p_t = central[i] / 100.0
-    conc = max(p_t * (1 - p_t) / se ** 2 - 1.0, 10.0)
+    conc = max(p_t * (1 - p_t) / se ** 2 - 1.0, cfg.poll_dirichlet_conc_floor)
 
     if cfg.verbose:
         print(f"-> Time-Horizon Uncertainty: election {cfg.election_date}. "
@@ -602,26 +658,26 @@ def _fit_volume_posterior(df: pd.DataFrame, cfg: ModelConfig) -> dict:
     n_free = max(T - 1 - t0, 0)
     has_free = has_early and n_free > 0                                # tau_t is only identified from t0 onwards
     with pm.Model(coords={"booth": names}):
-        s_a = pm.HalfNormal("sigma_a", sigma=1.5)
+        s_a = pm.HalfNormal("sigma_a", sigma=cfg.vol_sigma_a_sd)
         a_z = pm.Normal("a_z", 0.0, 1.0, dims="booth")
         a = pm.Deterministic("a", a_z * s_a, dims="booth")
         if has_free:
-            tau_free = pm.Normal("tau_free", 0.0, 0.5, shape=n_free)
+            tau_free = pm.Normal("tau_free", 0.0, cfg.vol_tau_sd, shape=n_free)
             tau = pm.Deterministic("tau", pt.concatenate([pt.zeros(t0 + 1), tau_free]))
         else:
             tau = pt.zeros(T)
-        kappa = pm.Gamma("kappa", alpha=2.0, beta=0.005)                 # concentration (mean 400)
+        kappa = pm.Gamma("kappa", alpha=cfg.vol_kappa_alpha, beta=cfg.vol_kappa_beta)                 # concentration (mean 400)
         for ti, yr in enumerate(years):
             idx = np.where(present[ti])[0]
             pi = pm.math.softmax(a[idx] + tau[ti] * btype[idx])
             pm.DirichletMultinomial(f"n_{yr}", n=int(C[ti, idx].sum()), a=kappa * pi,
                                     observed=C[ti, idx].astype(int))
-        idata = pm.sample(draws=cfg.draws, tune=max(cfg.tune, 3000), chains=cfg.chains,
+        idata = pm.sample(draws=(cfg.volume_draws or cfg.draws), tune=max(cfg.tune, cfg.volume_tune_floor), chains=cfg.chains,
                         target_accept=cfg.volume_target_accept, random_seed=cfg.seed,
                         return_inferencedata=True, progressbar=False)
     vars_ = ["sigma_a", "kappa"] + (["tau"] if has_free else [])
     summ = az.summary(idata, var_names=vars_)
-    div = _diagnose(idata, summ, "volume model")
+    div = _diagnose(idata, summ, "volume model", cfg)
     S = idata.posterior["kappa"].stack(sample=("chain", "draw")).values.shape[-1]
     tau_draws = _stack(idata, "tau") if has_free else np.zeros((S, T))
     return dict(names=names, years=years, btype=btype, t0=t0, totals=np.nansum(C, axis=1), divergences=div, diag=summ,
@@ -644,12 +700,12 @@ def _simulate_volumes(vfit: dict, D: int, cfg: ModelConfig, rng: np.random.Gener
     a, tau, kappa = dr["a"][idx][:, ai], dr["tau"][idx], dr["kappa"][idx]
     bt = vfit["btype"][ai]
     years, totals = vfit["years"], np.asarray(vfit["totals"], dtype=float)
-    t_year = target_year if target_year is not None else years[-1] + 4
+    t_year = target_year if target_year is not None else int(round(years[-1] + cfg.election_cycle_years))
     if t_year in years:                                               # in-sample election
         tau_t = tau[:, years.index(t_year)]
         Tn = np.full(D, totals[years.index(t_year)])
     else:
-        k = max(1, int(round((t_year - years[-1]) / 4.0)))
+        k = max(1, int(round((t_year - years[-1]) / cfg.election_cycle_years)))
         steps = np.diff(tau[:, min(vfit.get("t0", 0), tau.shape[1] - 1):], axis=1)   # identified steps only
         if cfg.volume_drift == "none" or steps.shape[1] == 0:
             drift = np.zeros(D)
@@ -690,7 +746,7 @@ def backtest_volume(booth_results: pd.DataFrame, config: Optional[ModelConfig] =
         last_y = int(train["year"].max())
         prev_all = train[train["year"] == last_y].set_index("booth")["n"]
         active = np.array([b in prev_all.index for b in vfit["names"]])
-        V = _simulate_volumes(vfit, 4000, cfg, rng, target_year=tgt, active=active)
+        V = _simulate_volumes(vfit, cfg.backtest_volume_sims, cfg, rng, target_year=tgt, active=active)
         t = df[df["year"] == tgt].set_index("booth")["n"]
         idx = [i for i, b in enumerate(vfit["names"]) if active[i] and b in t.index]
         names = [vfit["names"][i] for i in idx]
@@ -723,6 +779,27 @@ def _apply_onp_entry(p_next: np.ndarray, onp_state_pct: np.ndarray, cfg: ModelCo
     p_out = np.concatenate([p_next * (1.0 - s)[:, None, None], np.broadcast_to(s[:, None, None], (D, B, 1))], axis=2)
     return p_out, s
 
+def _apply_brian_mode(p_next: np.ndarray, parties: Sequence[str], cfg: ModelConfig):
+    """BrianMode: ONP as a fixed vote-transfer. In every booth and draw, ONP takes cfg.brian_onp_from_lnp of the LNP share and
+    cfg.brian_onp_from_alp of the ALP share; the rest of each party's vote stays put. Returns (p_out, retain) where p_out is
+    D x B x (K+1) (last = ONP) and retain[k] is the fraction of party k's modelled vote that survives."""
+    parties = list(parties)
+    if "ONP" in parties:
+        raise ValueError("BrianMode builds ONP itself, so 'ONP' must not be in cfg.parties.")
+    take = {"LNP": cfg.brian_onp_from_lnp, "ALP": cfg.brian_onp_from_alp}
+    for name, frac in take.items():
+        if not 0.0 <= frac <= 1.0:
+            raise ValueError(f"BrianMode fraction for {name} must be between 0 and 1, got {frac}.")
+    if not any(name in parties for name in take):
+        raise ValueError("BrianMode needs ALP and/or LNP in cfg.parties.")
+    retain = np.array([1.0 - take.get(p, 0.0) for p in parties], dtype=float)
+    onp = np.zeros(p_next.shape[:2], dtype=float)
+    for j, p in enumerate(parties):
+        onp += p_next[:, :, j] * (1.0 - retain[j])
+    p_out = np.concatenate([p_next * retain[None, None, :], onp[:, :, None]], axis=2)
+    return p_out, retain
+
+
 def uncertainty_attribution(fit: dict, S_next: np.ndarray, central: np.ndarray, V: np.ndarray, keep: np.ndarray, k0: int,
                             cfg: ModelConfig, onp_seat: Optional[np.ndarray] = None) -> pd.DataFrame:
     """Which layer makes the seat band wide? Re-simulates the target party's seat share with ONE layer switched off at a time
@@ -734,7 +811,7 @@ def uncertainty_attribution(fit: dict, S_next: np.ndarray, central: np.ndarray, 
     V_fixed = np.tile(np.median(V, axis=0), (D, 1))
 
     def run(shut):
-        rng = np.random.default_rng(cfg.seed + 101)
+        rng = np.random.default_rng(cfg.seed + cfg.attribution_seed_offset)
         p, _ = _simulate_next(fit, S_fixed if "poll" in shut else S_next, cfg, rng, shut=shut)
         Vm = (V_fixed if "volumes" in shut else V)[:, keep]
         share = 100.0 * np.einsum("db,db->d", Vm, p[:, keep, k0]) / Vm.sum(axis=1)
@@ -774,9 +851,17 @@ def predict_bayes(booths: pd.DataFrame, state_results: pd.DataFrame,
 
     S_next, central, target_poll, se_used, onp_state = _poll_draws(poll, cfg, state_results, D, rng)
     p_next, tide = _simulate_next(fit, S_next, cfg, rng)               # fitted model, ONP excluded
-    out_parties, onp_seat = list(parties), None
-    if onp_state is not None and cfg.onp_layer:               # ONP only enters the SEAT when explicitly switched on
+    out_parties, onp_seat, onp_attr = list(parties), None, None
+    if cfg.brian_mode:                                         # BrianMode: fixed LNP/ALP -> ONP transfer, ignores the ONP poll column
+        p_next, retain = _apply_brian_mode(p_next, parties, cfg)
+        out_parties = parties + ["ONP"]
+        onp_attr = np.full(D, 1.0 - retain[k0])               # what the target party loses to ONP, for the attribution table
+        if cfg.verbose:
+            print(f"-> BrianMode ON: ONP takes {100 * cfg.brian_onp_from_lnp:.0f}% of the LNP vote and "
+                  f"{100 * cfg.brian_onp_from_alp:.0f}% of the ALP vote (seat-level; statewide ONP poll/kappa layer bypassed).")
+    elif onp_state is not None and cfg.onp_layer:               # ONP only enters the SEAT when explicitly switched on
         p_next, onp_seat = _apply_onp_entry(p_next, onp_state, cfg, rng)
+        onp_attr = onp_seat
         out_parties = parties + ["ONP"]
 
     # booth volumes: modelled (total x booth shares) unless projected votes or registered electors are supplied
@@ -787,7 +872,7 @@ def predict_bayes(booths: pd.DataFrame, state_results: pd.DataFrame,
         w = projected_formal_votes.reindex(names).fillna(last_n).fillna(0.0).values.astype(float)
         V = np.tile(w, (D, 1))
     elif cfg.registered_electors is not None:
-        w = projected_votes_from_electors(booths, cfg)
+        w = projected_votes_from_electors(booths, cfg, cfg.registered_electors, cfg.expected_turnout_rate)
         w = w.reindex(names).fillna(last_n).fillna(0.0).values.astype(float)
         V = np.tile(w, (D, 1))
     else:
@@ -803,7 +888,7 @@ def predict_bayes(booths: pd.DataFrame, state_results: pd.DataFrame,
     kept_names = [names[i] for i in keep]
     Vk, Pk = V[:, keep], p_next[:, keep, :]
 
-    attribution = (uncertainty_attribution(fit, S_next, central, V, keep, k0, cfg, onp_seat) if cfg.run_attribution else None)
+    attribution = (uncertainty_attribution(fit, S_next, central, V, keep, k0, cfg, onp_attr) if cfg.run_attribution else None)
 
     # seat-wide shares, jointly across parties
     seat_all = 100.0 * np.einsum("db,dbk->dk", Vk, Pk) / Vk.sum(axis=1, keepdims=True)
@@ -877,6 +962,11 @@ def predict_bayes(booths: pd.DataFrame, state_results: pd.DataFrame,
         params["onp_seat_share_mean"] = float(100.0 * onp_seat.mean())
         params["onp_seat_ratio_median"] = float(cfg.onp_seat_ratio_median)
         
+    if cfg.brian_mode:
+        params["brian_mode"] = 1.0
+        params["brian_onp_from_lnp"] = float(cfg.brian_onp_from_lnp)
+        params["brian_onp_from_alp"] = float(cfg.brian_onp_from_alp)
+        params["onp_seat_share_mean"] = float(seat_all[:, -1].mean())
     if vfit is not None:
         params["volume_divergences"] = vfit["divergences"]
         params["volume_rhat_max"] = float(vfit["diag"]["r_hat"].max())
@@ -904,7 +994,8 @@ def backtest_bayes(booth_results: pd.DataFrame, state_results: Optional[pd.DataF
     return_draws=True returns (metrics_df, draws_by_year): for each target year, the predicted booth x party primary
     draws (in %), the booth names and the ACTUAL votes, so INANNA can push them through the preference flows."""
     from dataclasses import replace as _replace
-    cfg = _replace(config or ModelConfig(), poll_house_sd=0.0, verbose=False)
+    _base = config or ModelConfig()
+    cfg = _replace(_base, poll_house_sd=_base.backtest_poll_house_sd, verbose=False)
     state_results = STATE_RESULTS if state_results is None else state_results
     df_all = prepare_bayes_data(booth_results, cfg)
     years = sorted(df_all["year"].unique())
@@ -1008,7 +1099,8 @@ def append_history(res: ModelOutput, seat_folder: Path, pred_date: str) -> Path:
 
 #----------------------------------------------------------------------------- PLOTTERS
 def generate_booth_ridgeline_plot(res_model_output, target_party="ALP", top_n_booths=15,
-                                  output_path="booth_distributions.png", max_draws=1500, **kwargs):
+                                  output_path="booth_distributions.png", max_draws=1500, dpi=300,
+                                  special_keywords=("PRE-POLL", "PREPOLL", "DECLARATION", "ABSENT", "POSTAL"), **kwargs):
     """Ridgeline of the model's ACTUAL booth-level predictive draws (res.booth_draws_df); booths with
     pre-poll / declaration style names are always included, the rest are the largest by expected volume."""
     output_path = Path(output_path)
@@ -1018,7 +1110,7 @@ def generate_booth_ridgeline_plot(res_model_output, target_party="ALP", top_n_bo
         raise ValueError("No booth-level draws on the result (res.booth_draws_df); re-run predict().")
     if len(draws) > max_draws:
         draws = draws.sample(max_draws, random_state=0)
-    special = [b for b in draws.columns if any(k in str(b).upper() for k in ("PRE-POLL", "PREPOLL", "DECLARATION", "ABSENT", "POSTAL"))]
+    special = [b for b in draws.columns if any(k in str(b).upper() for k in special_keywords)]
     regular = fc[~fc["booth"].isin(special)].sort_values("formal_weight", ascending=False)["booth"].tolist()
     chosen = special + regular[: max(5, top_n_booths - len(special))]
     order = sorted(chosen, key=lambda b: draws[b].mean())
@@ -1050,12 +1142,12 @@ def generate_booth_ridgeline_plot(res_model_output, target_party="ALP", top_n_bo
     g.figure.suptitle(f"ENKI Monte Carlo {target_party} Vote Share Distribution (model draws)", fontsize=13, fontweight="bold", y=0.98)
     g.figure.subplots_adjust(left=0.32, right=0.95, top=0.92, bottom=0.08)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(str(output_path), dpi=300, bbox_inches="tight")
+    plt.savefig(str(output_path), dpi=dpi, bbox_inches="tight")
     plt.close()
     print(f"-> Ridgeline plot saved to: {output_path}")
 
 
-def generate_seat_distribution_plot(res_model_output, output_path="seat_distribution.png"):
+def generate_seat_distribution_plot(res_model_output, output_path="seat_distribution.png", dpi=300):
     """
     Plots primary vote probability density curves for ALL parties in forecast_draws.csv.
     Applies Worst/Average/Best reference lines EXCLUSIVELY to ALP.
@@ -1148,10 +1240,10 @@ def generate_seat_distribution_plot(res_model_output, output_path="seat_distribu
     ax.spines['bottom'].set_linewidth(2)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close()
     
-def generate_booth_volume_ridgeline(booths, forecasted_matrix, df_historical, output_path, top_n=15, log_scale=True):
+def generate_booth_volume_ridgeline(booths, forecasted_matrix, df_historical, output_path, top_n=15, log_scale=True, dpi=300):
     output_path = Path(output_path)
     
     # 1. Get the latest historical vote counts for each booth
@@ -1234,11 +1326,11 @@ def generate_booth_volume_ridgeline(booths, forecasted_matrix, df_historical, ou
     plt.tight_layout(rect=[0.22, 0, 0.85, 0.96])
     
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
     plt.close()
     print(f"-> Booth volume ridgeline plot saved to: {output_path}")
     
-def generate_booth_swing_scatter_plot(res_model_output, booth_input_df=None, output_path="booth_swing_scatter.png", label_all=True):
+def generate_booth_swing_scatter_plot(res_model_output, booth_input_df=None, output_path="booth_swing_scatter.png", label_all=True, dpi=300):
     """Expected booth volume vs projected swing from the booth's own LAST-election share.
     Both come from the model output (fc.last_share, fc.formal_weight); nothing is invented."""
     fc = res_model_output.forecast.copy()
@@ -1274,10 +1366,10 @@ def generate_booth_swing_scatter_plot(res_model_output, booth_input_df=None, out
     ax.spines['left'].set_linewidth(2)
     ax.spines['bottom'].set_linewidth(2)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close()
     
-def save_backtest_table_png(summary_df: pd.DataFrame, output_path: Path):
+def save_backtest_table_png(summary_df: pd.DataFrame, output_path: Path, dpi: int = 300):
     """Renders backtest summary metrics into a clean table PNG for a quick glance."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1327,7 +1419,7 @@ def save_backtest_table_png(summary_df: pd.DataFrame, output_path: Path):
 
     plt.suptitle("ENKI Backtest Error & Validation Summary", fontsize=14, fontweight="bold", y=0.92)
     plt.tight_layout()
-    plt.savefig(str(output_path), dpi=300, bbox_inches="tight")
+    plt.savefig(str(output_path), dpi=dpi, bbox_inches="tight")
     plt.close()
     print(f"-> Backtest summary table PNG saved to: {output_path}")
 
@@ -1358,125 +1450,375 @@ def save_run_meta(folder, cfg: ModelConfig, booths_path: str, polls_path: str) -
     """Small provenance record so a downstream stage can see which run it is reading."""
     meta = {"seat_name": cfg.seat_name, "party": cfg.party, "parties": list(cfg.parties), "prediction_date": cfg.prediction_date,
             "election_date": cfg.election_date, "booths_file": str(booths_path), "polls_file": str(polls_path),
-            "onp_layer": bool(cfg.onp_layer), "saved_at": pd.Timestamp.now().isoformat(timespec="seconds")}
+            "onp_layer": bool(cfg.onp_layer), "brian_mode": bool(cfg.brian_mode), "saved_at": pd.Timestamp.now().isoformat(timespec="seconds")}
     Path(folder).mkdir(parents=True, exist_ok=True)
     (Path(folder) / "run_meta.json").write_text(json.dumps(meta, indent=2))
 
 
-# ----------------------------------------------------------------------------- CLI
-def main(seat_name: str = "sample", booth_data: str = "sample_booth_results.csv", 
-        polls_data: str = "sample_polls.csv", output_root = "forecast_output", statewide_historical : pd.DataFrame = pd.DataFrame({
-            "year":  [1988,  1991,  1995,  1999,  2003,  2007,  2011,  2015,  2019,  2023],
-            "ALP":   [38.48, 39.11, 41.27, 42.21, 42.68, 38.87, 25.55, 34.08, 33.31, 36.97],
-            "LNP":   [49.54, 41.65, 39.81, 33.69, 34.35, 36.88, 51.15, 45.63, 41.58, 35.37],
-            "GRN":   [ 1.50,  2.05,  2.85,  2.80,  4.10,  7.60, 10.28, 10.29,  9.57,  9.70],
-            "ONP":   [ 0.00,  0.00,  0.00,  6.40,  0.70,  0.00,  0.00,  0.00,  1.10,  1.80],
-            "OTHER": [10.48, 17.19, 16.07, 14.90, 18.17, 16.65, 12.65, 10.00, 14.90, 16.60],
-        }), registered_voters : int =62169, expected_turnout : float = 0.91):
-    
-    STATE_RESULTS = statewide_historical
-    need_cols = {"year", "ALP", "LNP", "GRN", "OTHER"}
-    if not need_cols <= set(STATE_RESULTS.columns):               # fail early, clearly (the old DataFrame == check raised an ambiguity error)
-        raise ValueError(f"statewide_historical is missing columns: {sorted(need_cols - set(STATE_RESULTS.columns))}")
-    seat_name = seat_name
-    booths_path = booth_data
-    polls_path = polls_data
-    output_base = output_root
-    pred_date = date.today().strftime("%Y-%m-%d")
-    seat_folder = output_folder(output_base, seat_name, pred_date)
-    nested_out_dir = seat_folder / "ENKI"
-    nested_out_dir.mkdir(parents=True, exist_ok=True)
-    
-    cfg = ModelConfig(
-        registered_electors=registered_voters,
-        expected_turnout_rate=expected_turnout
-    )
+# ============================================================================= BLACKBOX:  ENKI(x) -> y
+# x = one dict (or a path to a .json file). EVERY variable in the system is a key in x; anything you leave out takes its
+# default. Unknown keys are rejected (a typo must never silently fall back to a default). y = ENKIOutput.
+#
+#   DATA keys    booth_results, polls, state_results, projected_formal_votes, target_year
+#                (DataFrame, or a path to a CSV; polls may instead be {"central":..,"low":..,"high":..})
+#   MODEL keys   every field of ModelConfig (seat, parties, priors, MCMC, poll layer, ONP/BrianMode, electors, ...)
+#   RUN keys     every field of RunOptions (what to run, where to write, plots)
+#
+# x may be flat, or grouped as {"data": {...}, "config": {...}, "run": {...}}; a flat key overrides a grouped one.
+@dataclass
+class RunOptions:
+    run_forecast: bool = True                     # fit + forecast the live election
+    run_backtest: bool = True                     # share-model backtest across past elections (one MCMC fit per target)
+    backtest_targets: Optional[Sequence[int]] = None   # None: every election from the third onward
+    run_volume_backtest: bool = False             # booth-volume backtest (slow; was never run by the old main)
+    output_root: Optional[str] = None             # None: write NOTHING to disk. Otherwise <root>/<Seat>/<date>/ENKI/
+    make_plots: bool = True                       # only if output_root is set
+    print_report: bool = True                     # terminal summary at the end
+    plot_top_n_booths: int = 15
+    plot_dpi: int = 300
+    plot_volume_log_scale: bool = True
+    plot_label_all_booths: bool = True
+    plot_ridgeline_max_draws: int = 1500
+    plot_ridgeline_keywords: Sequence[str] = ("PRE-POLL", "PREPOLL", "DECLARATION", "ABSENT", "POSTAL")
 
-    print("==================================================")
-    print(" STEP 1: RUNNING HISTORICAL BACKTESTS & SUMMARY")
-    print("==================================================")
-    
-    # Load historical booth and state data for backtesting primary engine accuracy
-    booth_df = pd.read_csv(booths_path)
-    poll_df = pd.read_csv(polls_path)
-    
-    # Configure model for Balmain ALP vs GRN matchup
-    cfg = ModelConfig(
-        party="ALP",
-        parties=("ALP", "LNP", "GRN", "OTHER"),
-        beta_preset="data",
-        seat_name=seat_name,
-        prediction_date=pred_date,
-        election_date="2027-03-13",
-        draws=2000,
-        tune=2000,
-        chains=4,
-        seed=42,
-        target_accept=0.99
-    )
 
-    print("Backtesting the share and volume models across historical election cycles...")
-    bt, bt_draws = backtest_bayes(booth_df, STATE_RESULTS, cfg, return_draws=True)
-    bt_csv_path = nested_out_dir / "backtest.csv"
-    bt.to_csv(bt_csv_path, index=False)
-    save_backtest_draws(bt_draws, nested_out_dir)          # hand-off to INANNA (no ENKI re-run needed there)
-    print(bt.round(2).T.to_string())
-    
-    # Save backtest results as a clean table PNG for a quick visual glance at error margins
-    table_png_path = nested_out_dir / "backtest_summary_table.png"
-    save_backtest_table_png(bt, table_png_path)
+@dataclass
+class ENKIOutput:
+    forecast: Optional[ModelOutput] = None        # the full predict() result (params, booths, tide, forecast, seat, draws, ...)
+    seat_summary: Optional[pd.DataFrame] = None   # seat-wide primary vote per party: mean + the scenario percentiles
+    backtest: Optional[pd.DataFrame] = None
+    backtest_draws: Optional[dict] = None
+    volume_backtest: Optional[pd.DataFrame] = None
+    config: Dict[str, Any] = field(default_factory=dict)     # the FULLY RESOLVED ModelConfig that was run (defaults filled in)
+    run: Dict[str, Any] = field(default_factory=dict)        # the resolved RunOptions
+    data_sources: Dict[str, str] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
+    output_dir: Optional[str] = None
+    files: Dict[str, str] = field(default_factory=dict)
 
-    print("\n==================================================")
-    print(" STEP 2: RUNNING LIVE 2027 FORECAST PIPELINE")
-    print("==================================================")
-    
-    print(f"Loading data for {cfg.party} from '{booths_path}' and '{polls_path}'...")
-    res = predict(booth_results=booth_df, state_results=STATE_RESULTS, poll=poll_df, config=cfg)
 
-    print("Generating diagnostic plots (ridgelines, log-scale volume distributions, and swing scatter)...")
-    generate_seat_distribution_plot(res, output_path=nested_out_dir / "seat_distribution.png")
-    generate_booth_swing_scatter_plot(res, output_path=nested_out_dir / "booth_swing_scatter.png")
-    generate_booth_ridgeline_plot(
-        res_model_output=res, 
-        target_party=cfg.party, 
-        top_n_booths=15,
-        output_path=nested_out_dir / "ridgeline.png"
-    )
-    generate_booth_volume_ridgeline(
-        booths=res.volume_names, 
-        forecasted_matrix=res.volume_matrix,
-        df_historical=res.prepared_df,
-        output_path=nested_out_dir / "booth_volume_ridgeline.png", 
-        top_n=15, 
-        log_scale=True
-    )
-    
-    res.save(str(nested_out_dir))
-    save_actual_primaries(res.prepared_df, cfg.parties, nested_out_dir)   # hand-off to INANNA
-    save_run_meta(nested_out_dir, cfg, booths_path, polls_path)
-    append_history(res, seat_folder, pred_date)
+_DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year")
+_SEQ_FIELDS = ("parties", "early_keywords", "exclude_booths", "scenario_pct")
 
-    pd.set_option("display.width", 160)
-    lo, mid, hi = cfg.scenario_pct
+
+def _jsonable(o):
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.ndarray, tuple, set)):
+        return list(o)
+    if isinstance(o, Path):
+        return str(o)
+    return str(o)
+
+
+def _load_x(x) -> Dict[str, Any]:
+    """dict | path to .json -> one flat dict. Groups ('data','config','run') are merged; flat keys win over grouped ones."""
+    if isinstance(x, (str, Path)):
+        x = json.loads(Path(x).read_text(encoding="utf-8"))
+    if not isinstance(x, dict):
+        raise TypeError("ENKI(x): x must be a dict or a path to a .json file.")
+    flat: Dict[str, Any] = {}
+    for grp in ("data", "config", "run"):
+        sub = x.get(grp)
+        if sub is None:
+            continue
+        for k, v in dict(sub).items():
+            if k in flat:
+                raise ValueError(f"Key {k!r} appears in more than one group of x.")
+            flat[k] = v
+    flat.update({k: v for k, v in x.items() if k not in ("data", "config", "run")})
+    return flat
+
+
+def _frame(v, name: str) -> pd.DataFrame:
+    if isinstance(v, pd.DataFrame):
+        return v.copy()
+    if isinstance(v, (str, Path)):
+        return pd.read_csv(v)
+    if isinstance(v, (list, dict)):
+        return pd.DataFrame(v)
+    raise TypeError(f"{name}: expected a DataFrame, a CSV path, or records; got {type(v).__name__}.")
+
+
+def _validate(cfg: ModelConfig, run: RunOptions) -> List[str]:
+    """Hard errors are raised together; soft problems are returned as warnings."""
+    err: List[str] = []
+    warn: List[str] = []
+    P = list(cfg.parties)
+    if len(P) < 2 or len(set(P)) != len(P):
+        err.append("parties must have at least two distinct entries.")
+    if cfg.party not in P:
+        err.append(f"party={cfg.party!r} must be one of parties={P}.")
+    if "OTHER" in P and P[-1] != "OTHER":
+        warn.append("OTHER is not the last party; the LAST party is the reference category.")
+    for n in ("draws", "tune", "chains"):
+        if int(getattr(cfg, n)) < 1:
+            err.append(f"{n} must be >= 1.")
+    for n in ("target_accept", "volume_target_accept"):
+        if not 0.0 < float(getattr(cfg, n)) < 1.0:
+            err.append(f"{n} must be strictly between 0 and 1.")
+    sp = [float(v) for v in cfg.scenario_pct]
+    if len(sp) != 3 or not (0.0 < sp[0] < sp[1] < sp[2] < 100.0):
+        err.append("scenario_pct must be three increasing percentiles in (0, 100), e.g. (5, 50, 95).")
+    for n in ("sigma_alpha_sd", "sigma_eps_sd", "sigma_d_median", "sigma_d_sdlog", "beta_data_sd", "beta_uniform_sd",
+              "beta_grn_sd", "beta_other_sd", "m_prior_sd", "rho_beta_a", "rho_beta_b", "vol_sigma_a_sd", "vol_tau_sd",
+              "vol_kappa_alpha", "vol_kappa_beta", "poll_half_life_months", "poll_z", "election_cycle_years",
+              "poll_default_sample_size", "volume_step_floor"):
+        if not float(getattr(cfg, n)) > 0.0:
+            err.append(f"{n} must be > 0.")
+    for n in ("poll_house_sd", "time_horizon_gamma", "volume_total_sd_floor", "backtest_poll_house_sd"):
+        if float(getattr(cfg, n)) < 0.0:
+            err.append(f"{n} must be >= 0.")
+    if cfg.d_persist is not None and not -1.0 < float(cfg.d_persist) < 1.0:
+        err.append("d_persist must be None (estimate it) or a number in (-1, 1).")
+    if cfg.beta_preset not in ("data", "uniform"):
+        err.append("beta_preset must be 'data' or 'uniform'.")
+    if cfg.volume_drift not in ("last", "mean", "none"):
+        err.append("volume_drift must be 'last', 'mean' or 'none'.")
+    if not 0.0 < float(cfg.expected_turnout_rate) <= 1.0:
+        err.append("expected_turnout_rate must be in (0, 1].")
+    if cfg.registered_electors is not None and float(cfg.registered_electors) <= 0.0:
+        err.append("registered_electors must be positive (or None).")
+    for n in ("brian_onp_from_lnp", "brian_onp_from_alp", "onp_max_seat_share"):
+        if not 0.0 <= float(getattr(cfg, n)) <= 1.0:
+            err.append(f"{n} must be between 0 and 1.")
+    if float(cfg.onp_seat_ratio_median) <= 0.0 or float(cfg.onp_seat_ratio_sdlog) < 0.0:
+        err.append("onp_seat_ratio_median must be > 0 and onp_seat_ratio_sdlog >= 0.")
+    try:
+        pred, elec = pd.to_datetime(cfg.prediction_date), pd.to_datetime(cfg.election_date)
+        if elec < pred:
+            warn.append(f"election_date {cfg.election_date} is before prediction_date {cfg.prediction_date}: "
+                        "the time-horizon uncertainty collapses to 0.")
+    except Exception:
+        err.append("prediction_date / election_date must be parseable dates (YYYY-MM-DD).")
+    if cfg.brian_mode and cfg.onp_layer:
+        warn.append("brian_mode and onp_layer are both on: BrianMode takes precedence and the statewide-ONP layer is bypassed.")
+    if cfg.brian_mode and "ONP" in P:
+        err.append("brian_mode builds ONP itself, so 'ONP' must not be in parties.")
+    if run.output_root is None and run.make_plots:
+        warn.append("make_plots is on but output_root is None, so no plots are drawn.")
+    if err:
+        raise ValueError("ENKI(x): invalid input:\n  - " + "\n  - ".join(err))
+    return warn
+
+
+def _resolve(x):
+    """x -> (data dict, ModelConfig, RunOptions, warnings, data_sources). Nothing is run."""
+    flat = _load_x(x)
+    cfg_names = {f.name for f in fields(ModelConfig)}
+    run_names = {f.name for f in fields(RunOptions)}
+    known = cfg_names | run_names | set(_DATA_KEYS)
+    unknown = sorted(set(flat) - known)
+    if unknown:
+        hints = []
+        for k in unknown:
+            m = difflib.get_close_matches(k, sorted(known), n=1)
+            hints.append(f"{k!r}" + (f" (did you mean {m[0]!r}?)" if m else ""))
+        raise KeyError("ENKI(x): unknown input key(s): " + ", ".join(hints))
+
+    cfg_kw = {k: v for k, v in flat.items() if k in cfg_names}
+    run_kw = {k: v for k, v in flat.items() if k in run_names}
+    for k in _SEQ_FIELDS:
+        if cfg_kw.get(k) is not None:
+            cfg_kw[k] = tuple(cfg_kw[k])
+    if cfg_kw.get("beta_priors"):
+        cfg_kw["beta_priors"] = {p: tuple(v) for p, v in cfg_kw["beta_priors"].items()}
+    if run_kw.get("plot_ridgeline_keywords") is not None:
+        run_kw["plot_ridgeline_keywords"] = tuple(run_kw["plot_ridgeline_keywords"])
+    cfg = ModelConfig(**cfg_kw)
+    run = RunOptions(**run_kw)
+    if cfg.prediction_date is None:
+        cfg.prediction_date = date.today().strftime("%Y-%m-%d")      # recorded in the output so the run is reproducible
+    warnings_ = _validate(cfg, run)
+
+    src: Dict[str, str] = {}
+    if flat.get("booth_results") is None:
+        raise KeyError("ENKI(x): 'booth_results' is required (DataFrame or CSV path).")
+    data: Dict[str, Any] = {"booth_results": _frame(flat["booth_results"], "booth_results")}
+    src["booth_results"] = str(flat["booth_results"]) if isinstance(flat["booth_results"], (str, Path)) else "<in-memory>"
+
+    if run.run_forecast:
+        if flat.get("polls") is None:
+            raise KeyError("ENKI(x): 'polls' is required to forecast (DataFrame, CSV path, or {'central','low','high'}).")
+        pl = flat["polls"]
+        if isinstance(pl, PollInput):
+            data["polls"] = pl
+        elif isinstance(pl, dict) and set(pl) == {"central", "low", "high"}:
+            data["polls"] = PollInput(float(pl["central"]), float(pl["low"]), float(pl["high"]))
+        else:
+            data["polls"] = _frame(pl, "polls")
+        src["polls"] = str(pl) if isinstance(pl, (str, Path)) else "<in-memory>"
+
+    if flat.get("state_results") is None:
+        data["state_results"] = STATE_RESULTS.copy()
+        src["state_results"] = "<built-in STATE_RESULTS>"
+    else:
+        data["state_results"] = _frame(flat["state_results"], "state_results")
+        src["state_results"] = str(flat["state_results"]) if isinstance(flat["state_results"], (str, Path)) else "<in-memory>"
+    need = {"year"} | set(cfg.parties)
+    absent = sorted(need - set(data["state_results"].columns))
+    if absent:
+        raise ValueError(f"state_results is missing columns: {absent}")
+
+    pfv = flat.get("projected_formal_votes")
+    if pfv is not None:
+        data["projected_formal_votes"] = pfv if isinstance(pfv, pd.Series) else pd.Series(pfv, dtype=float)
+        if cfg.registered_electors is not None:
+            warnings_.append("projected_formal_votes AND registered_electors are both set: projected_formal_votes wins.")
+    data["target_year"] = flat.get("target_year")
+    return data, cfg, run, warnings_, src
+
+
+def _seat_summary(res: ModelOutput, cfg: ModelConfig) -> pd.DataFrame:
+    lo, mid, hi = (float(v) for v in cfg.scenario_pct)
     q = res.draws_df.quantile([lo / 100, mid / 100, hi / 100]).T
     q.columns = [f"p{lo:g}", f"p{mid:g}", f"p{hi:g}"]
     q.insert(0, "mean", res.draws_df.mean())
-    
+    return q
+
+
+def _print_report(y: ENKIOutput, cfg: ModelConfig) -> None:
+    pd.set_option("display.width", 160)
+    for w in y.warnings:
+        print(f"WARNING: {w}")
+    if y.backtest is not None:
+        print("\nBACKTEST (share model)")
+        print(y.backtest.round(2).T.to_string())
+    res = y.forecast
+    if res is None:
+        return
     print("\nSEAT-WIDE PRIMARY VOTE (joint draws, volume-weighted; sums to 100% in every draw)")
-    print(q.round(2).to_string())
+    print(y.seat_summary.round(2).to_string())
     if res.attribution is not None:
         print(f"\nUNCERTAINTY ATTRIBUTION: width of the 90% band on {cfg.party} seat share, one layer off at a time")
         print(res.attribution.round(2).to_string(index=False))
     print(f"\nDiagnostics: max r_hat={res.params['rhat_max']:.3f}, min ESS={res.params['ess_bulk_min']:.0f}, "
-        f"divergences={res.params['divergences']} (volume model: {res.params.get('volume_divergences', 'n/a')})")
-    
+          f"divergences={res.params['divergences']} (volume model: {res.params.get('volume_divergences', 'n/a')})")
     priors = beta_prior_table(cfg)
     print("beta (sensitivity to the party's own statewide log-share swing): posterior vs prior")
     for p in cfg.parties:
         print(f"  {p:6s}: {res.params[f'beta_{p}']:.2f} +/- {res.params[f'beta_{p}_sd']:.2f}   (prior {priors[p][0]:.2f} +/- {priors[p][1]:.2f})")
 
-    print(f"\nFinished: seat '{seat_name}'. All outputs written to: {nested_out_dir}/")
+
+def ENKI(x) -> ENKIOutput:
+    """The blackbox. ENKI(x) -> y.  See the header above for what x may contain."""
+    data, cfg, run, warnings_, sources = _resolve(x)
+    y = ENKIOutput(config=json.loads(json.dumps(asdict(cfg), default=_jsonable)),
+                   run=json.loads(json.dumps(asdict(run), default=_jsonable)),
+                   data_sources=sources, warnings=warnings_)
+    booth_df, state_df = data["booth_results"], data["state_results"]
+
+    out_dir: Optional[Path] = None
+    seat_folder: Optional[Path] = None
+    if run.output_root:
+        seat_folder = output_folder(run.output_root, cfg.seat_name, cfg.prediction_date)
+        out_dir = seat_folder / "ENKI"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        y.output_dir = str(out_dir)
+
+    def _note(name: str, path: Path) -> None:
+        y.files[name] = str(path)
+
+    if run.run_backtest:
+        print("==================================================")
+        print(" RUNNING HISTORICAL BACKTEST")
+        print("==================================================")
+        y.backtest, y.backtest_draws = backtest_bayes(booth_df, state_df, cfg, targets=run.backtest_targets, return_draws=True)
+        if out_dir is not None:
+            y.backtest.to_csv(out_dir / "backtest.csv", index=False)
+            _note("backtest", out_dir / "backtest.csv")
+            save_backtest_draws(y.backtest_draws, out_dir)                # hand-off to INANNA
+            if run.make_plots:
+                try:
+                    save_backtest_table_png(y.backtest, out_dir / "backtest_summary_table.png", dpi=run.plot_dpi)
+                    _note("backtest_table_png", out_dir / "backtest_summary_table.png")
+                except Exception as e:
+                    y.warnings.append(f"backtest table plot failed: {e!r}")
+
+    if run.run_volume_backtest:
+        y.volume_backtest = backtest_volume(booth_df, cfg, targets=run.backtest_targets)
+        if out_dir is not None:
+            y.volume_backtest.to_csv(out_dir / "backtest_volume.csv", index=False)
+            _note("backtest_volume", out_dir / "backtest_volume.csv")
+
+    if run.run_forecast:
+        print("\n==================================================")
+        print(f" RUNNING FORECAST: {cfg.seat_name}  (target {cfg.election_date})")
+        print("==================================================")
+        res = predict(booth_results=booth_df, state_results=state_df, poll=data["polls"], config=cfg,
+                      projected_formal_votes=data.get("projected_formal_votes"), target_year=data.get("target_year"))
+        y.forecast = res
+        y.seat_summary = _seat_summary(res, cfg)
+        if out_dir is not None:
+            if run.make_plots:
+                plots = {
+                    "seat_distribution.png": lambda p: generate_seat_distribution_plot(res, output_path=p, dpi=run.plot_dpi),
+                    "booth_swing_scatter.png": lambda p: generate_booth_swing_scatter_plot(res, output_path=p, label_all=run.plot_label_all_booths, dpi=run.plot_dpi),
+                    "ridgeline.png": lambda p: generate_booth_ridgeline_plot(res_model_output=res, target_party=cfg.party, top_n_booths=run.plot_top_n_booths,
+                                                                              output_path=p, max_draws=run.plot_ridgeline_max_draws, dpi=run.plot_dpi,
+                                                                              special_keywords=run.plot_ridgeline_keywords),
+                    "booth_volume_ridgeline.png": lambda p: generate_booth_volume_ridgeline(booths=res.volume_names, forecasted_matrix=res.volume_matrix,
+                                                                                            df_historical=res.prepared_df, output_path=p, top_n=run.plot_top_n_booths,
+                                                                                            log_scale=run.plot_volume_log_scale, dpi=run.plot_dpi),
+                }
+                for fname, fn in plots.items():
+                    try:
+                        fn(out_dir / fname)
+                        _note(fname, out_dir / fname)
+                    except Exception as e:                                # a failed picture must never cost the forecast
+                        y.warnings.append(f"plot {fname} failed: {e!r}")
+            res.save(str(out_dir))
+            save_actual_primaries(res.prepared_df, cfg.parties, out_dir)   # hand-off to INANNA
+            save_run_meta(out_dir, cfg, sources.get("booth_results", ""), sources.get("polls", ""))
+            y.seat_summary.to_csv(out_dir / "seat_primary_summary.csv")
+            append_history(res, seat_folder, cfg.prediction_date)
+            _note("forecast_dir", out_dir)
+
+    if out_dir is not None:
+        (out_dir / "inputs_resolved.json").write_text(
+            json.dumps({"config": y.config, "run": y.run, "data_sources": y.data_sources}, indent=2, default=_jsonable), encoding="utf-8")
+        _note("inputs_resolved", out_dir / "inputs_resolved.json")
+    if run.print_report:
+        _print_report(y, cfg)
+        if out_dir is not None:
+            print(f"\nFinished: seat '{cfg.seat_name}'. All outputs written to: {out_dir}/")
+    return y
+
+
+# ----------------------------------------------------------------------------- CLI
+def main(seat_name: str = "sample", booth_data: str = "sample_booth_results.csv", polls_data: str = "sample_polls.csv",
+         output_root: str = "forecast_output", statewide_historical: Optional[pd.DataFrame] = None,
+         registered_voters: Optional[int] = 62169, expected_turnout: float = 0.91, brian_mode: bool = True, **overrides) -> ENKIOutput:
+    """Backward-compatible entry point: the old keyword arguments map onto x, and ANY other key of x can be passed as a keyword."""
+    x = dict(seat_name=seat_name, booth_results=booth_data, polls=polls_data, output_root=output_root,
+             state_results=statewide_historical, registered_electors=registered_voters,
+             expected_turnout_rate=expected_turnout, brian_mode=brian_mode)
+    x.update(overrides)
+    return ENKI(x)
+
+
+def _cli(argv: Sequence[str]) -> ENKIOutput:
+    """python ENKI_V2.py                       -> legacy defaults (sample files)
+       python ENKI_V2.py input.json            -> ENKI(input.json)
+       python ENKI_V2.py input.json draws=500 poll_house_sd=2.5 brian_mode=false     (key=value overrides, values parsed as JSON)"""
+    path, over = None, {}
+    for a in argv:
+        if "=" in a:
+            k, v = a.split("=", 1)
+            try:
+                over[k] = json.loads(v)
+            except json.JSONDecodeError:
+                over[k] = v
+        else:
+            path = a
+    if path is None:
+        return main(**over)
+    x = _load_x(path)
+    x.update(over)
+    return ENKI(x)
 
 
 if __name__ == "__main__":
-    main()
+    _cli(sys.argv[1:])
