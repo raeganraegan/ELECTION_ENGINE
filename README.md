@@ -26,6 +26,7 @@ This is divided into two parts.
 - [ ] Part 2: [INANNA](/INANNA_V2.py) Uses above data and applies OPV preferences to them.
 
 So the overall flow is
+
 $$
 In \rightarrow ENKI(In) \rightarrow Out_1 \rightarrow INANNA(Out_1) \rightarrow Out_2
 $$
@@ -42,9 +43,9 @@ This part of the document outlines the step-by-step mathematical model and equat
 
 * **Booth Continuity:** Polling places maintain consistent catchments over time; historical venue changes are manually merged upfront.
 * **Sum-to-One Consistency:** Booth party shares are modeled via softmax/multinomial-logit link functions, guaranteeing all booth and seat totals strictly sum to 100%.
-* **Decoupled Independents:** Major parties (`ALP`, `LNP`, `GRN`) partially track statewide polling trends ($\beta \approx 0.3$), whereas `OTHER`/independents are decoupled ($\beta = 0.0$).
-* **Seat-Wide Local Shift:** Local candidate effects and scandals form an electorate-wide autoregressive trend ($d_t$) that persists moderately ($\text{Beta}(2,2)$) across elections.
-* **Poll Decay & Error Budget:** Older polls decay exponentially (2-month half-life). Total polling uncertainty combines sample variance, a 3.25 pt house-effect, and time-horizon decay ($\gamma \sqrt{\Delta t}$).
+* **Decoupled Independents:** Major parties (`ALP`, `LNP`, `GRN`) partially track statewide polling trends ($`\beta \approx 0.3`$), whereas `OTHER`/independents are decoupled ($`\beta = 0.0`$).
+* **Seat-Wide Local Shift:** Local candidate effects and scandals form an electorate-wide autoregressive trend ($`d_t`$) that persists moderately ($`\text{Beta}(2,2)`$) across elections.
+* **Poll Decay & Error Budget:** Older polls decay exponentially (2-month half-life). Total polling uncertainty combines sample variance, a 3.25 pt house-effect, and time-horizon decay ($`\gamma \sqrt{\Delta t}`$).
 * **Vote Volume Conservation:** Booth volumes model voter shift toward early/postal voting while conserving overall electorate turnout.
 * **Wildcard Entry (ONP):** One Nation vote shifts cannot be inferred from standard history, relying instead on explicit transfer rules (e.g., *BrianMode* taking 20% LNP / 5% ALP).
 
@@ -53,39 +54,39 @@ This part of the document outlines the step-by-step mathematical model and equat
 ### Parameter & Input Definitions
 
 * **Inputs & Random Variables:**
-  * $\mathbf{Y}$ – Historical booth result matrices
-  * $\mathbf{S}$ – Dirichlet-aggregated opinion polling vector
-  * $\mathbf{z} = \{z_T, z_d, z_\varepsilon\}$ – Standard normal draws ($\mathcal{N}(0,1)$) driving MCMC posterior simulation
-  * $\boldsymbol{\theta}$ – Fitted model hyperparameters ($\beta, \rho, \sigma_d, \sigma_\varepsilon, \mu_g, \sigma_g$)
+  * $`\mathbf{Y}`$ – Historical booth result matrices
+  * $`\mathbf{S}`$ – Dirichlet-aggregated opinion polling vector
+  * $`\mathbf{z} = \{z_T, z_d, z_\varepsilon\}`$ – Standard normal draws ($\\mathcal{N}(0,1)$) driving MCMC posterior simulation
+  * $`\boldsymbol{\theta}`$ – Fitted model hyperparameters ($`\beta, \rho, \sigma_d, \sigma_\varepsilon, \mu_g, \sigma_g`$)
 
 * **Numerator Components (Party Vote Volume):**
-  * $\text{Multinomial}_b(\dots)$ – Simulated turnout volume ($V_b$) at booth $b$
-  * $(1 - f_k)$ – One Nation (ONP) leakage/flow fraction modifier for party $k$
-  * $\text{softmax}_k(\dots)$ – Converts booth latent utility ($\boldsymbol{\eta}_b$) into vote share probability ($p_{kb}$)
-  * $m + \alpha_b$ – Global baseline mean $m$ and booth-specific intercept modifier $\alpha_b$
-  * $\beta(\ln S - \text{mean}_t \ln S)$ – Polling swing predictor ($x^*$) scaled by party sensitivity $\beta$
-  * $(\rho d_T + \sqrt{1-\rho^2}\sigma_d z_d)$ – Autoregressive seat-wide local shift ($d^*$)
-  * $\sigma_\varepsilon z_\varepsilon$ – Residual local noise/booth jitter
+  * $`\text{Multinomial}_b(\dots)`$ – Simulated turnout volume ($`V_b`$) at booth $b$
+  * $`(1 - f_k)`$ – One Nation (ONP) leakage/flow fraction modifier for party $k$
+  * $`\text{softmax}_k(\dots)`$ – Converts booth latent utility ($`\boldsymbol{\eta}_b`$) into vote share probability ($`p_{kb}`$)
+  * $`m + \alpha_b`$ – Global baseline mean $m$ and booth-specific intercept modifier $`\alpha_b`$
+  * $`\beta(\ln S - \text{mean}_t \ln S)`$ – Polling swing predictor ($`x^*`$) scaled by party sensitivity $`\beta`$
+  * $`(\rho d_T + \sqrt{1-\rho^2}\sigma_d z_d)`$ – Autoregressive seat-wide local shift ($`d^*`$)
+  * $`\sigma_\varepsilon z_\varepsilon`$ – Residual local noise/booth jitter
 
 * **Denominator (Total Seat Turnout Volume):**
-  * $\sum_b V_b$ – Sum of all booth turnout volumes across the electorate
+  * $`\sum_b V_b`$ – Sum of all booth turnout volumes across the electorate
 
 * **Turnout & Volume Parameters:**
-  * $T_T$ – Baseline total seat turnout volume
-  * $a$ – Intercept vector for early voting proportion calculations
-  * $\tau'$ – Coefficient parameter for early voting accessibility
-  * $\kappa$ – Dirichlet concentration hyperparameter
-  * $\text{early}$ – Local booth indicator metric representing early voting accessibility or historical proportion
+  * $`T_T`$ – Baseline total seat turnout volume
+  * $`a`$ – Intercept vector for early voting proportion calculations
+  * $`\tau'`$ – Coefficient parameter for early voting accessibility
+  * $`\kappa`$ – Dirichlet concentration hyperparameter
+  * `early` – Local booth indicator metric representing early voting accessibility or historical proportion
 
 * **Polling Decay & Variance Parameters:**
-  * $H$ – Recency decay half-life parameter (set to 2 months)
-  * $\gamma$ – Time-decay variance factor for the polling error budget
-  * $\tau$ – Elapsed time interval from the polling date
+  * $`H`$ – Recency decay half-life parameter (set to 2 months)
+  * $`\gamma`$ – Time-decay variance factor for the polling error budget
+  * $`\tau`$ – Elapsed time interval from the polling date
 
 ---
 ### Unified ENKI V3 Master Model Equation
 
-The full ENKI V3 primary vote estimation pipeline—combining Bayesian baseline fitting, polling shift dynamics, local autoregressive trends, turnout volume estimation, and One Nation adjustments into a single function is represented in two ways for the purposes of this Readme. An abstracted model highlighting what's going on, and a :
+The full ENKI V3 primary vote estimation pipeline—combining Bayesian baseline fitting, polling shift dynamics, local autoregressive trends, turnout volume estimation, and One Nation adjustments into a single function is represented in two ways for the purposes of this Readme. An abstracted model highlighting what's going on, and a detailed mathematical formulation:
 
 
 #### Abstracted Model
@@ -142,7 +143,7 @@ $$
 
 ### 1. Model Fitting & Priors
 
-* **What it does:** Fits a hierarchical Bayesian model to past election data using MCMC, estimating booth-level baseline intercepts ($\alpha_{kb}$), historical electorate shifts ($d_{kt}$), polling sensitivities ($\beta_k$), and variance parameters.
+* **What it does:** Fits a hierarchical Bayesian model to past election data using MCMC, estimating booth-level baseline intercepts ($\\alpha_{kb}$), historical electorate shifts ($`d_{kt}`$), polling sensitivities ($\\beta_k$), and variance parameters.
 * **Why we do it:** Polling alone is too coarse to capture hyper-local booth behavior. Fitting this model extracts every booth's underlying partisan baseline and measures how strongly major parties react to broader political tides while incorporating estimation uncertainty.
 
 #### Likelihood & Core Equation:
@@ -157,7 +158,7 @@ $$
 
 #### Prior Distributions:
 
-- **Booth Intercept & Noise Priors:** $ \alpha = \sigma_\alpha z, \quad \varepsilon = \sigma_\varepsilon z $
+- **Booth Intercept & Noise Priors:** $`\alpha = \sigma_\alpha z, \quad \varepsilon = \sigma_\varepsilon z`$
 - **Time-Series / Autoregressive Local Shift Prior:**
 
 $$
@@ -185,8 +186,8 @@ $$
 * **What it does:** Aggregates published statewide opinion polls into a unified Dirichlet prior distribution, weighting recent polls higher and inflating variance for house effects and time decay.
 * **Why we do it:** Individual polls contain sample noise, house bias, and decay over time. Aggregating them via a Dirichlet distribution provides a stable, probabilistic picture of statewide party momentum leading up to election day.
 
-- **Recency Decay Weighting:** $w_i = 0.5^{\frac{\text{age}_i}{H}}$
-- **Weighted Mean Shift:** $\hat{s} = \frac{\sum w s}{\sum w}$
+- **Recency Decay Weighting:** $`w_i = 0.5^{\frac{\text{age}_i}{H}}`$
+- **Weighted Mean Shift:** $`\hat{s} = \frac{\sum w s}{\sum w}`$
 - **Combined Variance / Standard Error:**
 
 $$
@@ -209,20 +210,23 @@ $$
 
 ### 3. Seat-Wide Tide
 
-* **What it does:** Combines the statewide polling swing ($x^*$) with the seat's persistent local autoregressive trend ($d^*$) to produce a total linear party shift ($\text{lin}_k$).
+* **What it does:** Combines the statewide polling swing ($`x^*`$) with the seat's persistent local autoregressive trend ($`d^*`$) to produce a total linear party shift ($\\text{lin}_k$).
 * **Why we do it:** Election trends are two-dimensional: statewide political tides push major parties up or down, while local electorate factors (e.g., candidate popularity or local issues) shift the baseline independently.
 
-- **Shift Calculation:** $x^* = \ln S - \text{mean}_t \ln S$
-- **Projected Autoregressive Shift:** $d^* = \rho \, d_T + \sqrt{1 - \rho^2} \, \sigma_d z_d$
+- **Shift Calculation:** $`x^* = \ln S - \text{mean}_t \ln S`$
+- **Projected Autoregressive Shift:** $`d^* = \rho \, d_T + \sqrt{1 - \rho^2} \, \sigma_d z_d`$
 - **Total Linear Party Shift:**
-  $$\text{lin}_k = \beta_k x^*_k + d^*_k$$
+
+$$
+\text{lin}_k = \beta_k x^*_k + d^*_k
+$$
 
 ---
 
 ### 4. Booth Shares
 
-* **What it does:** Computes booth-specific latent utility scores ($\eta_{kb}$) by combining baseline intercepts, linear seat shifts, and local noise, then converts them to probabilities via a softmax function.
-* **Why we do it:** Translates abstract seat-wide trends and booth baselines into explicit party primary vote probabilities ($\boldsymbol{p}_b$) that are mathematically guaranteed to sum to 100% at every single polling place.
+* **What it does:** Computes booth-specific latent utility scores ($\\eta_{kb}$) by combining baseline intercepts, linear seat shifts, and local noise, then converts them to probabilities via a softmax function.
+* **Why we do it:** Translates abstract seat-wide trends and booth baselines into explicit party primary vote probabilities ($\\boldsymbol{p}_b$) that are mathematically guaranteed to sum to 100% at every single polling place.
 
 - **Latent Utility / Score:**
 
@@ -240,7 +244,7 @@ $$
 
 ### 5. Turnout & Volumes
 
-* **What it does:** Simulates turnout volume ($V_b$) across all physical and early/pre-poll voting centers using multinomial and Dirichlet distributions.
+* **What it does:** Simulates turnout volume ($`V_b`$) across all physical and early/pre-poll voting centers using multinomial and Dirichlet distributions.
 * **Why we do it:** Primary vote percentages must be weighted by actual voter numbers. Since early and postal voting proportions fluctuate significantly, modeling turnout volumes ensures larger booths and pre-poll centers correctly dominate the electorate total.
 
 - **Adjusted Expected Turnout:**
@@ -284,7 +288,7 @@ $$
 
 ### 7. Final Aggregation
 
-* **What it does:** Multiplies booth-level party shares ($p'_{kb}$) by booth turnout volumes ($V_b$), sums them across all booths in the electorate, and divides by total electorate turnout to output final seat-wide primary vote predictions and uncertainty intervals.
+* **What it does:** Multiplies booth-level party shares ($`p'_{kb}`$) by booth turnout volumes ($`V_b`$), sums them across all booths in the electorate, and divides by total electorate turnout to output final seat-wide primary vote predictions and uncertainty intervals.
 * **Why we do it:** Aggregates booth-level granular predictions into the final electorate primary vote distribution, providing point estimates and confidence intervals for ENKI's primary vote output.
 
 - **Weighted Global Score:**
@@ -293,9 +297,9 @@ $$
 s_k = \frac{\sum V_b \, p'_{kb}}{\sum V_b}
 $$
 
-*Percentiles are subsequently calculated over posterior draws $\theta^{(i)}$.*
+*Percentiles are subsequently calculated over posterior draws $\\theta^{(i)}$.*
 
-
+---
 # What does this output?
 
 Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
