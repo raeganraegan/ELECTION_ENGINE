@@ -218,7 +218,7 @@ $$
 - **Total Linear Party Shift:**
 
 $$
-\text{lin}_k = \beta_k x^*_k + d^*_k
+\text{lin}_k = \beta_k x^{*}_{k} + d^{*}_{k}
 $$
 
 ---
