@@ -103,7 +103,7 @@ class ModelConfig:
     # ONP takes brian_onp_from_lnp of the LNP vote and brian_onp_from_alp of the ALP vote, booth by booth, AFTER the
     # fitted model has produced its ex-ONP booth shares. GRN / OTHER are untouched, so every booth still sums to 100%.
     # It does not need an ONP poll column. Backtests are unaffected (they never apply the ONP layer).
-    brian_mode: bool = False
+    brian_mode: bool = True
     brian_onp_from_lnp: float = 0.20              # share of the LNP vote that goes to ONP
     brian_onp_from_alp: float = 0.05              # share of the ALP vote that goes to ONP
     
@@ -148,6 +148,12 @@ class ModelConfig:
     data_check_jump_threshold: float = 0.15       # flag a year-on-year change in the seat formal total bigger than this
     attribution_seed_offset: int = 101            # attribution re-simulation seed = seed + this
     backtest_poll_house_sd: float = 0.0           # the backtest uses ACTUAL statewide shares, so house error is off by default
+    
+    # --- Phase 1 Change Additions ---
+    #NOTE: This deals with how correlated errors are across parties (i.e., party shock in booth b effects booth n)
+    tide_process: str = "ar1"                       # "ar1" (existing) or "random_walk" (secular drift)
+    use_correlated_errors: bool = False             # Use LKJ Cholesky covariance matrix for party-level eps/tide errors
+    lkj_eta: float = 2.0                            # LKJ prior shape parameter (higher = more concentrated around independence)
 
 @dataclass
 class PollInput:
@@ -470,7 +476,6 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
         sigma_eps = pm.HalfNormal("sigma_eps", sigma=cfg.sigma_eps_sd / np.sqrt(2.0), dims="party")
         # Use pm.TruncatedNormal to keep continuous gradient lines intact for NUTS
         alpha_z_raw = pm.Normal("alpha_z_raw", 0.0, 1.0, dims=("booth", "party"))
-        eps_z = pm.Normal("eps_z", 0.0, 1.0, dims=("obs", "party"))
         
         alpha_base = alpha_z_raw * sigma_alpha
         lnp_idx = parties.index("LNP") if "LNP" in parties else 1
@@ -481,38 +486,49 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
         
         alpha_b = pm.Deterministic("alpha_b", alpha_b_raw, dims=("booth", "party"))
 
-
-        if est_rho:
-            rho = pm.Beta("rho_d", alpha=cfg.rho_beta_a, beta=cfg.rho_beta_b)                         # shared persistence of the seat tide
-            innov = pt.sqrt(pt.maximum(1.0 - rho ** 2, 1e-6))
+        # --- PHASE 1 IMPLEMENTATION: Correlated Errors via LKJ Cholesky ---
+        if cfg.use_correlated_errors:
+            chol_packed, _, _ = pm.LKJCholeskyCov("chol_cov", eta=cfg.lkj_eta, n=K, sd_dist=pm.HalfNormal.dist(sigma=1.0), compute_corr=True)
+            d_z_raw = pm.Normal("d_z_raw", 0.0, 1.0, shape=(T, K))
+            eps_z_raw = pm.Normal("eps_z_raw", 0.0, 1.0, shape=(N, K))
+            d_z = pt.dot(d_z_raw, chol_packed.T)
+            eps_z = pt.dot(eps_z_raw, chol_packed.T)
         else:
-            rho = float(cfg.d_persist)
-            innov = float(np.sqrt(max(1.0 - rho ** 2, 1e-6)))
-        d_z = pm.Normal("d_z", 0.0, 1.0, dims=("year", "party"))                # non-centred AR(1) innovations
-        d_steps = [sigma_d * d_z[0, :]]
-        for t in range(1, T):
-            d_steps.append(rho * d_steps[-1] + innov * sigma_d * d_z[t, :])
-        d_t = pm.Deterministic("d_t", pt.stack(d_steps, axis=0), dims=("year", "party"))   # (T, K), ALL parties
-        eps = pm.Deterministic("eps", eps_z * sigma_eps, dims=("obs", "party"))             # (N, K) all parties
-        # Fetch each booth's unique beta vector relative to the observation index row
-        beta_obs = beta_matrix[des["booth_idx"]]                                # (N, K)
-        bx = beta_obs * des["x"][des["year_idx"]]                              # (N, K) localized state-swing effect
-        
-        d_obs = d_t[des["year_idx"]]                                            # (N, K)
-        m_full = pt.concatenate([m, pt.zeros((1,))])                            # reference party: m_K = 0
-        eta = m_full[None, :] + alpha_b[des["booth_idx"]] + bx + d_obs + eps    # (N, K)
+            d_z = pm.Normal("d_z", 0.0, 1.0, dims=("year", "party"))
+            eps_z = pm.Normal("eps_z", 0.0, 1.0, dims=("obs", "party"))
+
+        # --- PHASE 1 IMPLEMENTATION: Secular Random Walk vs AR(1) Tide ---
+        if cfg.tide_process == "random_walk":
+            d_steps = [sigma_d * d_z[0, :]]
+            for t in range(1, T):
+                d_steps.append(d_steps[-1] + sigma_d * d_z[t, :])
+            d_t = pm.Deterministic("d_t", pt.stack(d_steps, axis=0), dims=("year", "party"))
+            rho = 1.0
+        else:
+            if est_rho:
+                rho = pm.Beta("rho_d", alpha=cfg.rho_beta_a, beta=cfg.rho_beta_b)
+                innov = pt.sqrt(pt.maximum(1.0 - rho ** 2, 1e-6))
+            else:
+                rho = float(cfg.d_persist)
+                innov = float(np.sqrt(max(1.0 - rho ** 2, 1e-6)))
+            d_steps = [sigma_d * d_z[0, :]]
+            for t in range(1, T):
+                d_steps.append(rho * d_steps[-1] + innov * sigma_d * d_z[t, :])
+            d_t = pm.Deterministic("d_t", pt.stack(d_steps, axis=0), dims=("year", "party"))
+
+        eps = pm.Deterministic("eps", eps_z * sigma_eps, dims=("obs", "party"))
+        beta_obs = beta_matrix[des["booth_idx"]]                                
+        bx = beta_obs * des["x"][des["year_idx"]]                              
+        d_obs = d_t[des["year_idx"]]                                            
+        m_full = pt.concatenate([m, pt.zeros((1,))])                            
+        eta = m_full[None, :] + alpha_b[des["booth_idx"]] + bx + d_obs + eps    
 
         pm.Multinomial("y_obs", n=n, p=pm.math.softmax(eta, axis=-1), observed=Y)
         idata = pm.sample(draws=cfg.draws, tune=cfg.tune, chains=cfg.chains, target_accept=cfg.target_accept,
                         random_seed=cfg.seed, return_inferencedata=True)
 
-
-        # Point ArviZ directly to the raw continuous parameters to avoid calculating R-hat on a locked constant
     summ = az.summary(idata, var_names=["mu_beta_raw", "sigma_beta", "m", "sigma_alpha", "sigma_d", "sigma_eps"]
-                    + (["rho_d"] if est_rho else []))
-
-
-
+                    + (["rho_d"] if est_rho and cfg.tide_process != "random_walk" else []))
 
     divergences = diagnose_sampler(idata, summ, "share model", cfg)
     if divergences > 0:
@@ -520,16 +536,18 @@ def fit_bayesian_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFram
         sd = idata.posterior["sigma_d"].values.reshape(dv.size, -1)
         print(f"  mean sigma_d in divergent draws {sd[dv].mean():.3f} vs {sd.mean():.3f} overall "
             "(clustered at small values => tighten sigma_d_median / sigma_d_sdlog).")
+    
+    rho_draws = (_stack(idata, "rho_d") if est_rho and cfg.tide_process != "random_walk" 
+                 else np.full(_stack(idata, "sigma_d").shape[0], 1.0 if cfg.tide_process == "random_walk" else float(cfg.d_persist)))
+
     des.update(
-        draws={"beta": _stack(idata, "mu_beta_vec"),  # Extracts the combined hyper-means tensor smoothly
+        draws={"beta": _stack(idata, "mu_beta_vec"),  
                "beta_matrix": _stack(idata, "beta_matrix"),
                "m": _stack(idata, "m"),
-            
             "sigma_d": _stack(idata, "sigma_d"), "sigma_eps": _stack(idata, "sigma_eps"),
             "sigma_alpha": _stack(idata, "sigma_alpha"), "sigma_beta": _stack(idata, "sigma_beta"),
             "alpha": _stack(idata, "alpha_b"), "d": _stack(idata, "d_t"), "eps": _stack(idata, "eps"),
-            "rho": (_stack(idata, "rho_d") if est_rho
-                    else np.full(_stack(idata, "sigma_d").shape[0], float(cfg.d_persist)))},
+            "rho": rho_draws},
         diag=summ.reset_index().rename(columns={"index": "parameter"}), divergences=divergences, idata=idata)
     return des
 
@@ -548,7 +566,13 @@ def _simulate_next(fit: dict, S_next_pct: np.ndarray, cfg: ModelConfig, rng: np.
     # Party-level swing term is always (D, K). Booth-specific slopes (the fit's beta_matrix) are (D, B, K).
     bx_party = dr["beta"] * x_next                                            # (D, K)
     rho = (np.asarray(dr["rho"], dtype=float) if "rho" in dr else np.full(D, float(cfg.d_persist or 0.0)))[:, None]   # (D, 1)
-    d_next = rho * dr["d"][:, -1, :] + np.sqrt(np.maximum(1.0 - rho ** 2, 0.0)) * dr["sigma_d"] * rng.standard_normal((D, K)) * (0.0 if "tide" in shut else 1.0)
+    
+    # --- PHASE 1 IMPLEMENTATION: Random Walk vs AR(1) Tide Projection ---
+    if cfg.tide_process == "random_walk":
+        d_next = dr["d"][:, -1, :] + dr["sigma_d"] * rng.standard_normal((D, K)) * (0.0 if "tide" in shut else 1.0)
+    else:
+        d_next = rho * dr["d"][:, -1, :] + np.sqrt(np.maximum(1.0 - rho ** 2, 0.0)) * dr["sigma_d"] * rng.standard_normal((D, K)) * (0.0 if "tide" in shut else 1.0)
+        
     lin_party = bx_party + d_next                                             # (D, K)
     if "beta_matrix" in dr and tuple(dr["beta_matrix"].shape) == (D, B, K):
         lin = dr["beta_matrix"] * x_next[:, None, :] + d_next[:, None, :]    # (D, B, K): each booth has its own sensitivity
@@ -594,9 +618,9 @@ def _poll_draws(poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig, state_df
                 with_onp = 100.0 * central[i] / (central.sum() + onp_c)
                 without = 100.0 * central[i] / central.sum()
                 print(f"\n!! WARNING: ONE NATION IS BEING DROPPED FROM THE STATEWIDE POLLS !!\n"
-                      f"   Polls have ONP at {onp_c:.1f}% but cfg.onp_layer is False, so it is removed and the other parties are scaled up.\n"
-                      f"   {cfg.party} statewide poll share: {with_onp:.1f}% with ONP kept vs {without:.1f}% as modelled "
-                      f"(+{without - with_onp:.1f} pts inflation). Seat forecasts inherit this.")
+                    f"   Polls have ONP at {onp_c:.1f}% but cfg.onp_layer is False, so it is removed and the other parties are scaled up.\n"
+                    f"   {cfg.party} statewide poll share: {with_onp:.1f}% with ONP kept vs {without:.1f}% as modelled "
+                    f"(+{without - with_onp:.1f} pts inflation). Seat forecasts inherit this.")
         if (cfg.onp_layer or cfg.onp_state_denominator) and "ONP" in poll.columns and "ONP" not in parties:
             try:
                 onp_central = float(poll_summary(poll, "ONP", cfg.poll_half_life_months, cfg.poll_as_of, cfg.poll_moe,
@@ -619,7 +643,7 @@ def _poll_draws(poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig, state_df
         central, onp_central = full[:-1], float(full[-1])
         if cfg.onp_state_denominator and cfg.verbose:
             print(f"-> ONP kept in the statewide denominator: polls ONP {onp_central:.1f}%, {cfg.party} statewide {central[i]:.1f}% "
-                  f"(ONP gets no seat share unless cfg.onp_layer is on).")
+                f"(ONP gets no seat share unless cfg.onp_layer is on).")
     else:
         central = 100.0 * central / central.sum()
         if cfg.verbose and isinstance(poll, pd.DataFrame) and "ONP" not in poll.columns and cfg.onp_layer:
@@ -1436,20 +1460,20 @@ def ENKI(x) -> ENKIOutput:
 
 # ----------------------------------------------------------------------------- CLI
 def main(seat_name: str = "sample", booth_data: str = "sample_booth_results.csv", polls_data: str = "sample_polls.csv",
-         output_root: str = "forecast_output", statewide_historical: Optional[pd.DataFrame] = None,
+        output_root: str = "forecast_output", statewide_historical: Optional[pd.DataFrame] = None,
          registered_voters: Optional[int] = 62169, expected_turnout: float = 0.91, brian_mode: bool = True, **overrides) -> ENKIOutput:
     """Backward-compatible entry point: the old keyword arguments map onto x, and ANY other key of x can be passed as a keyword."""
     x = dict(seat_name=seat_name, booth_results=booth_data, polls=polls_data, output_root=output_root,
-             state_results=statewide_historical, registered_electors=registered_voters,
-             expected_turnout_rate=expected_turnout, brian_mode=brian_mode)
+            state_results=statewide_historical, registered_electors=registered_voters,
+            expected_turnout_rate=expected_turnout, brian_mode=brian_mode)
     x.update(overrides)
     return ENKI(x)
 
 
 def _cli(argv: Sequence[str]) -> ENKIOutput:
     """python ENKI_V2.py                       -> legacy defaults (sample files)
-       python ENKI_V2.py input.json            -> ENKI(input.json)
-       python ENKI_V2.py input.json draws=500 poll_house_sd=2.5 brian_mode=false     (key=value overrides, values parsed as JSON)"""
+    python ENKI_V2.py input.json            -> ENKI(input.json)
+    python ENKI_V2.py input.json draws=500 poll_house_sd=2.5 brian_mode=false     (key=value overrides, values parsed as JSON)"""
     path, over = None, {}
     for a in argv:
         if "=" in a:
