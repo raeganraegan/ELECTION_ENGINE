@@ -295,6 +295,19 @@ $$
 
 *Percentiles are subsequently calculated over posterior draws $\theta^{(i)}$.*
 
+
+# What does this output?
+
+Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
+
+![image1](/Showcase/image1.png)
+
+![image2](/Showcase/image2.png)
+
+![image3](/Showcase/image3.png)
+
+As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident. 
+
 ---
 # V3 Planned Changes
 
