@@ -17,19 +17,12 @@ Calibrated for the NSW 2027 state election, but will attempt to use this in othe
 
 This document outlines the step-by-step mathematical model and equation pipeline for [ENKI Election Engine V3](/ENKI_V3.py).
 
-### Unified ENKI V3 Master Model Equation
+---
+## Assumptions: 
 
-The full ENKI V3 primary vote estimation pipeline—combining Bayesian baseline fitting, polling shift dynamics, local autoregressive trends, turnout volume estimation, and One Nation adjustments into a single function—is represented as:
-
-$$
-s_k\Big(\mathbf{Y}, \mathbf{S}, \mathbf{z}, \boldsymbol{\theta}\Big) = \frac{\sum_b \text{Multinomial}_b\!\Big(T_T e^{k \mu_g + v k \sigma_g z_T},\, \text{Dirichlet}\big(\kappa \cdot \text{softmax}(a + \tau' \text{early})\big)\!\Big) \cdot \Big[\big(1 - f_k\big) \cdot \text{softmax}_k\Big(m + \alpha_b + \beta \Big(\ln S - \text{mean}_t \ln S\Big) + \big(\rho d_T + \sqrt{1 - \rho^2}\sigma_d z_d\big) + \sigma_\varepsilon z_\varepsilon\Big)\Big]}{\sum_b \text{Multinomial}_b\!\Big(T_T e^{k \mu_g + v k \sigma_g z_T},\, \text{Dirichlet}\big(\kappa \cdot \text{softmax}(a + \tau' \text{early})\big)\!\Big)}
-$$
+To be added.
 
 ---
-
-## Step by Step Rundown of what happens.
-
-See below (definitions are important here)
 
 #### Parameter & Input Definitions
 
@@ -50,9 +43,23 @@ See below (definitions are important here)
 
 * **Denominator (Total Seat Turnout Volume):**
   * $\sum_b V_b$ – Sum of all booth turnout volumes across the electorate
+
+---
+### Unified ENKI V3 Master Model Equation
+
+The full ENKI V3 primary vote estimation pipeline—combining Bayesian baseline fitting, polling shift dynamics, local autoregressive trends, turnout volume estimation, and One Nation adjustments into a single function—is represented as:
+
+$$
+s_k\Big(\mathbf{Y}, \mathbf{S}, \mathbf{z}, \boldsymbol{\theta}\Big) = \frac{\sum_b \text{Multinomial}_b\!\Big(T_T e^{k \mu_g + v k \sigma_g z_T},\, \text{Dirichlet}\big(\kappa \cdot \text{softmax}(a + \tau' \text{early})\big)\!\Big) \cdot \Big[\big(1 - f_k\big) \cdot \text{softmax}_k\Big(m + \alpha_b + \beta \Big(\ln S - \text{mean}_t \ln S\Big) + \big(\rho d_T + \sqrt{1 - \rho^2}\sigma_d z_d\big) + \sigma_\varepsilon z_\varepsilon\Big)\Big]}{\sum_b \text{Multinomial}_b\!\Big(T_T e^{k \mu_g + v k \sigma_g z_T},\, \text{Dirichlet}\big(\kappa \cdot \text{softmax}(a + \tau' \text{early})\big)\!\Big)}
+$$
+
 ---
 
-## Pipeline Overview
+## ENKI V3 Step by Step
+
+Because the above equation is ludicriously long, and very hard to parse (even for a model like this) - the following goes through what the script does... step by step (i.e., what steps are mathematically applied to the inputs at each step). This is the same as doing individual components step by step manually and then aggregating them at the end.
+
+### Pipeline Overview
 
 | Step | Input $\rightarrow$ Output | Equations |
 | :--- | :--- | :--- |
@@ -144,13 +151,10 @@ $$
 
 ### 3. Seat-Wide Tide
 
-- **Shift Calculation:** $x^* = \ln S - c$
-- **Projected Autoregressive Shift:** $d^* = \rho \, d_T + \sqrt{1 - \rho^2} \, \sigma_d z$
-- **Total Linear Party Shift:**
-
-$$
-\text{lin}_k = \beta_k x^*_k + d^*_k
-$$
+* **Shift Calculation:** $x^* = \ln S - c$[cite: 1]
+* **Projected Autoregressive Shift:** $d^* = \rho \, d_T + \sqrt{1 - \rho^2} \, \sigma_d z$[cite: 1]
+* **Total Linear Party Shift:**
+  $$\text{lin}_k = \beta_k x^*_k + d^*_k$$[cite: 1]
 
 ---
 
