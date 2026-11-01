@@ -254,8 +254,11 @@ $$
 \mathbf{L}_{\Omega} \sim \text{LKJCholeskyCov}(\eta = 2.0, K)
 $$
 
-to transform standard normal draws $\mathbf{z}_t \rightarrow \mathbf{L}_{\Omega} \mathbf{z}_t$, modeling structured inter-party leakage.
+To transform standard normal draws via the mapping:
 
+$$\mathbf{z}_{t} \longrightarrow \mathbf{L}_{\Omega} \mathbf{z}_{t}$$
+
+modeling structured inter-party leakage.
 * **Hyperparameters:**
 
 $$
