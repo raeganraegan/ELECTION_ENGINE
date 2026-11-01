@@ -2,13 +2,12 @@
 
 This readme is a wip and is definitely not up to convention on how to write a readme, but you'll have to suck it up and just read whats going on.
 
----
 ## Project Metadata
 
-#### **Project Name:** 
+#### **Project Name:**
 ENKI Election Engine
 
-#### **Version:** 
+#### **Version:**
 V3.2 (Hierarchical Local Slopes & Covariance Update)
 
 #### **Author:**
@@ -18,7 +17,6 @@ Alec, aka [raeganraegan](https://github.com/raeganraegan) on github.
 It aims to predict the primary vote of an electorate seat by booth and aggregate that into boothwide data predicted for the seat. From this, the aim is to then simulate the OPV preference flows present within the NSW state election.
 
 Note, this has been tuned/calibrated to the upcoming [NSW state election](https://elections.nsw.gov.au/elections/state-elections/2027-nsw-state-election). I'm sure it can be tuned to other elections but that's for another version to implement. Aim is to get this version working before this election and to get actionable booth level data from the twofold prediction of this engine. A bold aim indeed.
-
 
 #### **How this works:**
 This is divided into two parts. 
@@ -52,22 +50,19 @@ y = ENKI({"booth_results": "booths.csv", "polls": "polls.csv", "seat_name": "Bal
 y.seat_summary      # seat-wide primary vote per party (mean + percentiles)
 y.config            # the fully resolved settings that were actually run
 ```
+
 ---
+
 # What does this output?
 
 Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
 
-![image1](/Showcase/image1.png)
-
-![image2](/Showcase/image2.png)
-
-![image3](/Showcase/image3.png)
-
-As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident. 
+As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident.
 
 Each run also saves `inputs_resolved.json` (every setting actually used) and, with `record_trace` on, a `trace.npz` holding the signal at each step above.
 
---- 
+---
+
 # Election Engine (ENKI_V3.py) V3.2 Model Specifications
 
 This part of the document outlines the step-by-step mathematical model and equation pipeline for [ENKI Election Engine V3.2](/ENKI_V3.py). It starts with the assumptions and notation, gives the whole model in two equations, then walks through each step. Every step lists the function in `ENKI_V3.py` that does it, and says where the code does something the equations alone would not tell you.
@@ -86,6 +81,7 @@ This part of the document outlines the step-by-step mathematical model and equat
 * **Wildcard Entry (ONP):** One Nation cannot be inferred from this seat's history, so it enters through explicit rules: *BrianMode* (default 20% of the LNP vote and 5% of the ALP vote go to ONP) or an entry layer scaled from the statewide ONP poll.
 
 ---
+
 ### Parameter & Input Definitions
 
 * **Inputs & Random Variables:**
@@ -120,6 +116,7 @@ This part of the document outlines the step-by-step mathematical model and equat
   * $\text{age}_i$ – Calendar months between poll $i$ and the latest (as-of) poll
 
 ---
+
 ### Unified ENKI V3.2 Master Model Equation
 
 #### Abstracted Model
@@ -153,6 +150,7 @@ $$
 with $\boldsymbol{S} \sim \text{Dirichlet}(\text{conc}\cdot\hat{\boldsymbol{s}})$ from the poll aggregate. If `use_correlated_errors=True`, error vectors $\boldsymbol{\varepsilon}_b$ and tide shocks $\boldsymbol{z}_d$ are generated via Cholesky factor transformation $\mathbf{L}_{\Omega} \boldsymbol{z}$. If you supply enrolment (`registered_electors`) or `projected_formal_votes`, $\boldsymbol{V}$ is fixed instead (Step 5). If BrianMode is off and `onp_layer` is on, the ONP row is the entry layer of Step 6 instead.
 
 ---
+
 ## ENKI V3.2 Step by Step
 
 ### Pipeline Overview
@@ -213,13 +211,14 @@ $$
 $$
 
   The `data` preset is mean 0.3, sd 0.30 (GRN sd 0.50); the `uniform` preset is mean 1.0, sd 0.15. `OTHER` sensitivity mean is 0.0 with an unconstrained prior SD of 1.0.
+
 - **Intercepts:** $m_k \sim \mathcal{N}(m_{0,k},\, 1)$, where $m_{0,k}$ is the empirical log-ratio of party $k$ to the reference.
 - **Booth offsets and noise:** $\alpha_{kb} = \sigma_{\alpha,k} z, \quad \varepsilon_{kbt} = \sigma_{\varepsilon,k} z$ with $\sigma_{\alpha,k} \sim \text{HalfNormal}(0.25/\sqrt2)$ and $\sigma_{\varepsilon,k} \sim \text{HalfNormal}(0.08/\sqrt2)$.
 - **Seat tide process (`tide_process`):**
   - **AR(1) Tide (`"ar1"`):** $d_{k,1} = \sigma_{d,k} z_1, \quad d_{kt} = \rho\, d_{k,t-1} + \sqrt{1-\rho^2}\,\sigma_{d,k}\, z_t$, with $\rho \sim \text{Beta}(2, 2)$.
   - **Random Walk (`"random_walk"`):** $d_{k,1} = \sigma_{d,k} z_1, \quad d_{kt} = d_{k,t-1} + \sigma_{d,k}\, z_t$, modeling secular multi-cycle structural drift.
 - **Correlated Shocks (`use_correlated_errors=True`):**
-  Uses an LKJ Cholesky decomposition factor $\mathbf{L}_{\Omega} \sim \text{LKJCholeskyCov}(\eta = \text{eta}, K)$ to transform standard draws $\boldsymbol{z}_t \rightarrow \mathbf{L}_{\Omega} \boldsymbol{z}_t$, modeling structured inter-party leakage.
+  Uses an LKJ Cholesky decomposition factor $\mathbf{L}_{\Omega} \sim \text{LKJCholeskyCov}(\eta = \text{lkj\_eta}, K)$ to transform standard draws $\boldsymbol{z}_t \rightarrow \mathbf{L}_{\Omega} \boldsymbol{z}_t$, modeling structured inter-party leakage.
 - **Hyperparameters:**
 
 $$
@@ -236,7 +235,7 @@ $$
 * **Why we do it:** Individual polls carry sampling noise and house bias, and the election is still some time away.
 
 - **Recency weight:** $w_i = 0.5^{\,\text{age}_i / H}$ (age in whole calendar months before the latest poll)
-- **Weighted mean:** $\hat{s}_k = \dfrac{\sum_i w_i s_{ik}}{\sum_i w_i}$, then renormalised so all shares, ONP included, sum to 100
+- **Weighted mean:** $\hat{s}_k = \frac{\sum_i w_i s_{ik}}{\sum_i w_i}$, then renormalised so all shares, ONP included, sum to 100
 - **Error budget** (uses the **target party's** share $p$; in points, converted to a proportion):
 
 $$
@@ -336,6 +335,7 @@ s_k = \frac{\sum_b V_b \, p'_{kb}}{\sum_b V_b}
 $$
 
 ---
+
 ## Known Limitations
 
 Things the model does not do, or does only weakly. None are bugs; they bound what the numbers mean.
@@ -345,8 +345,8 @@ Things the model does not do, or does only weakly. None are bugs; they bound wha
 - **The reference party matters.** Setting $\beta_K = 0$ for `OTHER` makes the model depend on which party is last in `parties`.
 - **Endogenous Volume-Share Linkage.** Volume $\boldsymbol{V}$ and share $\boldsymbol{p}_b$ are sampled independently, ignoring potential joint effects where polarization simultaneously alters turnout and vote choice.
 
-
 ---
+
 # V3 Planned Changes
 
 I'm currently working on the following (ticked off if completed):
@@ -358,7 +358,6 @@ I'm currently working on the following (ticked off if completed):
 - [ ] **Laplace Process Sensitivity Analysis**: Experimental transfer function sensitivity checks under ONP steps/ramps.
 
 Once that's done, it's a matter of doubling down into INANNA and making that ironclad.
-
 
 # Why so little information on INANNA?
 
