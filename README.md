@@ -52,6 +52,20 @@ y = ENKI({"booth_results": "booths.csv", "polls": "polls.csv", "seat_name": "Bal
 y.seat_summary      # seat-wide primary vote per party (mean + percentiles)
 y.config            # the fully resolved settings that were actually run
 ```
+---
+# What does this output?
+
+Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
+
+![image1](/Showcase/image1.png)
+
+![image2](/Showcase/image2.png)
+
+![image3](/Showcase/image3.png)
+
+As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident. 
+
+Each run also saves `inputs_resolved.json` (every setting actually used) and, with `record_trace` on, a `trace.npz` holding the signal at each step above.
 
 --- 
 # Election Engine (ENKI_V3.py) V3.1 Model Specifications
@@ -361,20 +375,6 @@ Things the model does not do, or does only weakly. None are bugs; they bound wha
 - **Volume** (path c): $\hat\mu_g$ and $\hat\sigma_g$ are plug-ins from a handful of past elections, and the early-vote drift extrapolates the last step. Path (b) has no volume uncertainty at all.
 - **No new booths, no redistribution.** See Core Assumptions.
 
----
-# What does this output?
-
-Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
-
-![image1](/Showcase/image1.png)
-
-![image2](/Showcase/image2.png)
-
-![image3](/Showcase/image3.png)
-
-As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident. 
-
-Each run also saves `inputs_resolved.json` (every setting actually used) and, with `record_trace` on, a `trace.npz` holding the signal at each step above.
 
 ---
 # V3 Planned Changes
