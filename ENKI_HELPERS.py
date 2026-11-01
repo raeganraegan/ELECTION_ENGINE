@@ -542,7 +542,7 @@ def print_run_report(y, cfg, priors) -> None:
         print(f"\nUNCERTAINTY ATTRIBUTION: width of the 90% band on {cfg.party} seat share, one layer off at a time")
         print(res.attribution.round(2).to_string(index=False))
     print(f"\nDiagnostics: max r_hat={res.params['rhat_max']:.3f}, min ESS={res.params['ess_bulk_min']:.0f}, "
-          f"divergences={res.params['divergences']} (volume model: {res.params.get('volume_divergences', 'n/a')})")
+        f"divergences={res.params['divergences']} (volume model: {res.params.get('volume_divergences', 'n/a')})")
     print("beta (sensitivity to the party's own statewide log-share swing): posterior vs prior")
     for p in cfg.parties:
         print(f"  {p:6s}: {res.params[f'beta_{p}']:.2f} +/- {res.params[f'beta_{p}_sd']:.2f}   (prior {priors[p][0]:.2f} +/- {priors[p][1]:.2f})")

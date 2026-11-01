@@ -1154,9 +1154,9 @@ def save_backtest_table_png(summary_df: pd.DataFrame, output_path: Path, dpi: in
         "seat_in_interval", "booth_MAE", "nochange_MAE", "statewide_swing_MAE", "booth_RMSE", "booth_cover"
     ]
     labels = {"seat_pred_median": "seat pred\nmedian", "seat_actual": "seat\nactual", "seat_error": "MODEL\nseat err",
-              "nochange_seat_err": "NO-CHANGE\nseat err", "statewide_swing_seat_err": "STATE-SWING\nseat err",
-              "seat_in_interval": "in 90%\ninterval", "booth_MAE": "MODEL\nbooth MAE", "nochange_MAE": "NO-CHANGE\nbooth MAE",
-              "statewide_swing_MAE": "STATE-SWING\nbooth MAE", "booth_RMSE": "booth\nRMSE", "booth_cover": "booth\ncover"}
+            "nochange_seat_err": "NO-CHANGE\nseat err", "statewide_swing_seat_err": "STATE-SWING\nseat err",
+            "seat_in_interval": "in 90%\ninterval", "booth_MAE": "MODEL\nbooth MAE", "nochange_MAE": "NO-CHANGE\nbooth MAE",
+            "statewide_swing_MAE": "STATE-SWING\nbooth MAE", "booth_RMSE": "booth\nRMSE", "booth_cover": "booth\ncover"}
     existing_cols = [c for c in display_cols if c in summary_df.columns]
     if not existing_cols:
         existing_cols = list(summary_df.columns)

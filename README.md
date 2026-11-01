@@ -212,7 +212,7 @@ $$
 \rho \sim \text{Beta}(2, 2), \qquad \sigma_{d,k} \sim \text{LogNormal}\!\left(\ln 0.3 - \tfrac12 \ln 2,\ 0.7\right)
 $$
 
-- **LNP baseline floor:** the `LNP` booth offset is floored at $-1.38$ (`pt.where`). At the current $\sigma_\alpha$ this is about seven standard deviations out and never binds. Its purpose is not documented in the code.
+- **LNP baseline floor:** the `LNP` booth offset is floored at $-1.38$ (`pt.where`). At the current $\sigma_\alpha$ this is about seven standard deviations out and never binds. Its purpose is to ensure that the LNP isn't arbitrarily low (sometimes it is)
 
 ---
 
