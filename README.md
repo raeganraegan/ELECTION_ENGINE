@@ -44,6 +44,7 @@ The reason this is split is so that I can program the primary vote calculation d
 | ----- | ----- | 
 | `ENKI_V3.py` | The model itself (fit, polls, tide, booths, volumes, ONP, seat) and the `ENKI(x) -> y` entry point. Backtesting still lives here until it gets its own script. | 
 | `ENKI_HELPERS.py` | Everything that supports the model but is not the model: input checks, plots, output files, terminal report, process-flow bookkeeping. | 
+| `ENKI_BACKTEST.py` | Literally designed just to store the backtesting features of this program. Spits out a neat little table of its summary finds on each run. | 
 
 #### **Quick start:**
 
@@ -61,6 +62,18 @@ y.config            # the fully resolved settings that were actually run
 # What does this output?
 
 Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
+
+![image1](/Showcase/image1.png)
+
+![image2](/Showcase/image2.png)
+
+![image3](/Showcase/image3.png)
+
+It also generates some tables on the backtesting so you can see how it performed in the past.
+
+![image4](/Showcase/image4.png)
+
+And a few excel sheets, and `npz` that are characteristic of the simulation as well.
 
 As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident.
 

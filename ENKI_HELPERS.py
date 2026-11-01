@@ -129,8 +129,8 @@ def append_history(res: ModelOutput, seat_folder: Path, pred_date: str) -> Path:
 
 
 def generate_booth_ridgeline_plot(res_model_output, target_party="ALP", top_n_booths=15,
-                                  output_path="booth_distributions.png", max_draws=1500, dpi=300,
-                                  special_keywords=("PRE-POLL", "PREPOLL", "DECLARATION", "ABSENT", "POSTAL"), **kwargs):
+                                output_path="booth_distributions.png", max_draws=1500, dpi=300,
+                                special_keywords=("PRE-POLL", "PREPOLL", "DECLARATION", "ABSENT", "POSTAL"), **kwargs):
     """Ridgeline of the model's ACTUAL booth-level predictive draws (res.booth_draws_df); booths with
     pre-poll / declaration style names are always included, the rest are the largest by expected volume."""
     output_path = Path(output_path)

@@ -1,5 +1,5 @@
 '''ENKI_V3.py -- the model (fit, polls, tide, booths, volumes, ONP, seat) and the ENKI(x) -> y blackbox.
-Helpers (plots, IO, validation, trace files) live in ENKI_HELPERS.py; the process-flow PDF is ENKI_PFD_PDF.py.
+Helpers (plots, IO, validation, trace files) live in ENKI_HELPERS.py; backtests live in ENKI_BACKTEST.py.
 
 CONSTRUCTS REALITY, AND THE BASICS. THE WINNING/LOSING AND STRATEGY COME LATER.
 ENKI IS THE GOD OF WISDOM WHO CREATES THE FUNDAMENTAL LAWS OF THE UNIVERSE, THE BASELINE REALITY.
@@ -20,6 +20,8 @@ from ENKI_HELPERS import (append_history, as_frame, check_booth_data, check_trac
                         generate_booth_ridgeline_plot, generate_booth_swing_scatter_plot, generate_booth_volume_ridgeline,
                         generate_seat_distribution_plot, jsonable, load_x, output_folder, print_run_report,
                         save_actual_primaries, save_run_meta, save_trace, validate_inputs)
+
+from ENKI_BACKTEST import backtest_bayes, backtest_volume, save_backtest_draws, save_backtest_table_png
 
 #Just making sure things are fine boss.
 try:
@@ -80,7 +82,7 @@ class ModelConfig:
     poll_house_sd: float = 1.50                    # extra poll error in points (2023 poll miss: 0.84)
     d_persist: Optional[float] = None             # None (default): rho_d ~ Beta(2,2) is ESTIMATED inside the fit (AR(1) tide, shared by all parties)
     include_eps: bool = True                      # booth-level local-shift noise in predictive draws
-    sigma_d_median: float = 0.30                  # LogNormal prior on sigma_d (log-ratio units). With beta pinned near 1,
+    sigma_d_median: float = 0.10                  # LogNormal prior on sigma_d (log-ratio units). With beta pinned near 1,
     sigma_d_sdlog: float = 0.7                    # d_t must absorb the seat's own offset (data: 0.3-1.0), so keep it free
     scenario_pct: Sequence[float] = (5, 50, 95)   # worst / average / best percentiles (matches the PDF)
     volume_drift: str = "last"                    # early-vote log-odds step: "last" (default; the share saturates), "mean" or "none"
@@ -92,7 +94,7 @@ class ModelConfig:
     # Hence you need to make your own assumptions, plug them in here.
     onp_layer: bool = True                        # polls table has an ONP column -> model One Nation as a separate ENTRANT
     onp_state_denominator: bool = True            # keep ONP in the statewide denominator (history AND polls) so a 20% ONP poll does not inflate the other parties; ONP still gets no seat share unless onp_layer
-    sigma_eps_sd: float = 0.08                     # HalfNormal scale of booth-election noise (was hard-coded); lower it if booth coverage sits well above 90%
+    sigma_eps_sd: float = 0.03                     # HalfNormal scale of booth-election noise (was hard-coded); lower it if booth coverage sits well above 90%
     run_attribution: bool = True                  # report which uncertainty layer drives the width of the seat band
     #SET BELOW TO 1.4 FOR REGIONAL/OUTER METRO SEATS, LOWER FOR LOWER ONE NATION SHARE.
     onp_seat_ratio_median: float = 0.65            # seat ONP share / statewide ONP share (East Hills 1999: 10.7 / 6.4)
@@ -136,7 +138,7 @@ class ModelConfig:
     election_cycle_years: float = 4.0             # years between elections (sets how many cycles ahead the target is)
     backtest_volume_sims: int = 4000              # draws used inside backtest_volume
     # --- statewide poll layer
-    time_horizon_gamma: float = 1.5               # extra poll sd (pts) = gamma * sqrt(years to election)
+    time_horizon_gamma: float = 0.8               # extra poll sd (pts) = gamma * sqrt(years to election)
     poll_z: float = 1.96                          # z behind the poll margin of error AND the low/high -> se conversion
     poll_default_sample_size: float = 1000.0      # used when a poll has no sample_size and none can be inferred
     poll_dirichlet_conc_floor: float = 10.0       # minimum Dirichlet concentration of the statewide share draws
@@ -778,45 +780,6 @@ def _simulate_volumes(vfit: dict, D: int, cfg: ModelConfig, rng: np.random.Gener
     return np.maximum(V, 0.0)
 
 
-def backtest_volume(booth_results: pd.DataFrame, config: Optional[ModelConfig] = None,
-                    targets: Optional[Sequence[int]] = None) -> pd.DataFrame:
-    """Predict each election's booth volumes from earlier elections only (slow: one fit per target).
-    Reports booth and total errors, vs no-change, and the early-vote share of the total."""
-    cfg = config or ModelConfig()
-    df = prepare_bayes_data(booth_results, cfg)
-    years = sorted(df["year"].unique())
-    rng = np.random.default_rng(cfg.seed)
-    rows = []
-    for tgt in (targets or years[2:]):
-        train = df[df["year"] < tgt]
-        vfit = _fit_volume_posterior(train, cfg)
-        last_y = int(train["year"].max())
-        prev_all = train[train["year"] == last_y].set_index("booth")["n"]
-        active = np.array([b in prev_all.index for b in vfit["names"]])
-        V = _simulate_volumes(vfit, cfg.backtest_volume_sims, cfg, rng, target_year=tgt, active=active)
-        t = df[df["year"] == tgt].set_index("booth")["n"]
-        idx = [i for i, b in enumerate(vfit["names"]) if active[i] and b in t.index]
-        names = [vfit["names"][i] for i in idx]
-        act = t.reindex(names).values.astype(float)
-        P = V[:, idx]
-        med = np.median(P, axis=0)
-        lo, hi = np.percentile(P, [5, 95], axis=0)
-        prev = prev_all.reindex(names).values.astype(float)
-        tot = V.sum(axis=1)
-        early = vfit["btype"].astype(bool)
-        e_pred = np.median(V[:, early].sum(axis=1) / np.maximum(tot, 1)) if early.any() else np.nan
-        e_act = (df[(df["year"] == tgt) & (df["btype"] == 1)]["n"].sum() / df[df["year"] == tgt]["n"].sum()) if early.any() else np.nan
-        rows.append({"target": int(tgt), "n_booths": len(names),
-                    "booth_MAPE_pct": float(np.mean(np.abs(med - act) / act) * 100),
-                    "nochange_MAPE_pct": float(np.mean(np.abs(prev - act) / act) * 100),
-                    "booth_cover_90": float(((act >= lo) & (act <= hi)).mean()),
-                    "total_pred_median": float(np.median(tot)), "total_actual": float(df[df["year"] == tgt]["n"].sum()),
-                    "total_error_pct": float((np.median(tot) / df[df["year"] == tgt]["n"].sum() - 1) * 100),
-                    "total_in_90": bool(np.percentile(tot, 5) <= df[df["year"] == tgt]["n"].sum() <= np.percentile(tot, 95)),
-                    "early_share_pred": float(e_pred), "early_share_actual": float(e_act),
-                    "divergences": vfit["divergences"]})
-    return pd.DataFrame(rows)
-
 def _apply_onp_entry(p_next: np.ndarray, onp_state_pct: np.ndarray, cfg: ModelConfig, rng: np.random.Generator):
     """One Nation as an ENTRANT: seat ONP share s = kappa * statewide ONP share (kappa lognormal), capped; the other
     parties keep their modelled shares of the remaining (1 - s). Returns p_out (D x B x (K+1), last = ONP) and s."""
@@ -1067,78 +1030,6 @@ def predict_bayes(booths: pd.DataFrame, state_results: pd.DataFrame,
         attribution=attribution
     )
 
-# ----------------------------------------------------------------------------- backtest (share model)
-def backtest_bayes(booth_results: pd.DataFrame, state_results: Optional[pd.DataFrame] = None,
-                config: Optional[ModelConfig] = None, targets: Optional[Sequence[int]] = None,
-                return_draws: bool = False):
-    """Refit on elections BEFORE each target; predict it using only the ACTUAL statewide shares (all parties) and
-    the ACTUAL booth volumes, so this isolates the share model. Predictive booth shares add binomial noise.
-    Also reports no-change and statewide-swing benchmarks for the target party. One MCMC fit per target.
-    return_draws=True returns (metrics_df, draws_by_year): for each target year, the predicted booth x party primary
-    draws (in %), the booth names and the ACTUAL votes, so INANNA can push them through the preference flows."""
-    from dataclasses import replace as _replace
-    _base = config or ModelConfig()
-    cfg = _replace(_base, poll_house_sd=_base.backtest_poll_house_sd, verbose=False)
-    state_results = STATE_RESULTS if state_results is None else state_results
-    df_all = prepare_bayes_data(booth_results, cfg)
-    years = sorted(df_all["year"].unique())
-    parties = list(cfg.parties)
-    k0 = parties.index(cfg.party)
-    rng = np.random.default_rng(cfg.seed)
-    lo_p, _, hi_p = (float(x) for x in cfg.scenario_pct)
-    rows = []
-    draws_out = {}
-    for tgt in (targets or years[2:]):
-        fit = fit_bayesian_model(df_all[df_all["year"] < tgt], cfg, state_results)
-        fit["idata"] = None                      # the backtest only needs the extracted draws; free the raw sampler output
-        D = len(fit["draws"]["beta"])
-        S_all = _state_matrix(state_results, parties, years, cfg.onp_state_denominator)
-        S_t = S_all.loc[tgt].values
-        p_next, _ = _simulate_next(fit, np.tile(S_t, (D, 1)), cfg, rng)
-        t = df_all[(df_all["year"] == tgt) & df_all["booth"].isin(fit["booth_names"])]
-        col = [fit["booth_names"].index(b) for b in t["booth"]]
-        n_t, y_t = t["n"].values, t["y"].values
-        if return_draws:
-            draws_out[int(tgt)] = {"booths": [str(b) for b in t["booth"]], "parties": parties,
-                                "booth_party_draws": 100.0 * p_next[:, col, :],          # (D, B_t, K) in %, rows sum to 100
-                                "actual_party_votes": np.column_stack([t[f"y_{p}"].values for p in parties]),
-                                "actual_n": n_t.astype(float)}
-        P = 100.0 * p_next[:, col, k0]
-        med, act = np.median(P, axis=0), 100.0 * y_t / n_t
-        rep = 100.0 * rng.binomial(n_t[None, :], p_next[:, col, k0]) / n_t[None, :]
-        lo, hi = np.percentile(rep, [lo_p, hi_p], axis=0)
-        seat = (P * n_t).sum(axis=1) / n_t.sum()
-        seat_act = float((act * n_t).sum() / n_t.sum())
-        s_lo, s50, s_hi = np.percentile(seat, [lo_p, 50, hi_p])
-        err = med - act
-        row = {"target": int(tgt), "seat_pred_median": s50, "seat_actual": seat_act, "seat_error": s50 - seat_act,
-            "seat_lo": s_lo, "seat_hi": s_hi, "seat_in_interval": bool(s_lo <= seat_act <= s_hi),
-               "booth_MAE": float(np.abs(err).mean()), "booth_RMSE": float(np.sqrt((err ** 2).mean())),
-            "booth_cover": float(((act >= lo) & (act <= hi)).mean()), "n_booths": len(t),
-            "divergences": fit["divergences"], "rhat_max": float(fit["diag"]["r_hat"].max())}
-        for j, p in enumerate(parties):                                 # every party's seat-wide error
-            yj = t[f"y_{p}"].values
-            sj = (100.0 * p_next[:, col, j] * n_t).sum(axis=1) / n_t.sum()
-            row[f"seat_err_{p}"] = float(np.median(sj) - 100.0 * yj.sum() / n_t.sum())
-        last_y = max(int(y) for y in years if y < tgt)
-        last = df_all[df_all["year"] == last_y].set_index("booth")["share"]
-        S_last = float(S_all.loc[last_y, cfg.party])
-        mk = np.array([b in last.index for b in t["booth"]])
-        row["common_n"] = int(mk.sum())
-        if mk.any():
-            prev = last.reindex(t["booth"].values[mk]).values
-            a_c, n_c, m_c = act[mk], n_t[mk], med[mk]
-            wavg = lambda v: float((v * n_c).sum() / n_c.sum())
-            e_md, e_nc, e_sw = m_c - a_c, prev - a_c, prev + (float(S_all.loc[tgt, cfg.party]) - S_last) - a_c
-            row.update({"model_MAE_common": float(np.abs(e_md).mean()), "nochange_MAE": float(np.abs(e_nc).mean()),
-                        "statewide_swing_MAE": float(np.abs(e_sw).mean()), "model_seat_err_common": wavg(e_md),
-                        "nochange_seat_err": wavg(e_nc), "statewide_swing_seat_err": wavg(e_sw)})
-        rows.append(row)
-        del fit, p_next, P, rep
-        gc.collect()
-    return (pd.DataFrame(rows), draws_out) if return_draws else pd.DataFrame(rows)
-
-
 # ----------------------------------------------------------------------------- f(input) = output
 def predict(booth_results: pd.DataFrame, state_results: Optional[pd.DataFrame],
             poll: Union[PollInput, pd.DataFrame],
@@ -1150,88 +1041,6 @@ def predict(booth_results: pd.DataFrame, state_results: Optional[pd.DataFrame],
     if state_results is None:
         state_results = STATE_RESULTS
     return predict_bayes(booth_results, state_results, poll, cfg, projected_formal_votes, target_year, trace)
-
-# ----------------------------------------------------------------------------- output folders
-
-
-
-
-#----------------------------------------------------------------------------- PLOTTERS
-
-
-    
-    
-    
-def save_backtest_table_png(summary_df: pd.DataFrame, output_path: Path, dpi: int = 300):
-    import matplotlib.pyplot as plt
-    """Renders backtest summary metrics into a clean table PNG for a quick glance."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    if summary_df is None or summary_df.empty:
-        print("-> Warning: Backtest summary dataframe is empty. Skipping table PNG generation.")
-        return
-
-    # Model vs naive benchmarks (signed seat errors and booth MAE on booths common to both elections)
-    display_cols = [
-        "target", "seat_pred_median", "seat_actual", "seat_error", "nochange_seat_err", "statewide_swing_seat_err",
-        "seat_in_interval", "booth_MAE", "nochange_MAE", "statewide_swing_MAE", "booth_RMSE", "booth_cover"
-    ]
-    labels = {"seat_pred_median": "seat pred\nmedian", "seat_actual": "seat\nactual", "seat_error": "MODEL\nseat err",
-            "nochange_seat_err": "NO-CHANGE\nseat err", "statewide_swing_seat_err": "STATE-SWING\nseat err",
-            "seat_in_interval": "in 90%\ninterval", "booth_MAE": "MODEL\nbooth MAE", "nochange_MAE": "NO-CHANGE\nbooth MAE",
-            "statewide_swing_MAE": "STATE-SWING\nbooth MAE", "booth_RMSE": "booth\nRMSE", "booth_cover": "booth\ncover"}
-    existing_cols = [c for c in display_cols if c in summary_df.columns]
-    if not existing_cols:
-        existing_cols = list(summary_df.columns)
-
-    df_plot = summary_df[existing_cols].copy()
-
-    for col in df_plot.columns:
-        if df_plot[col].dtype in [float, np.floating]:
-            df_plot[col] = df_plot[col].round(2)
-
-    fig, ax = plt.subplots(figsize=(max(12, len(existing_cols) * 1.5), len(df_plot) * 0.8 + 2.5))
-    ax.axis("off")
-    
-    table = ax.table(
-        cellText=df_plot.values,
-        colLabels=[labels.get(c, c) for c in df_plot.columns],
-        cellLoc="center",
-        loc="center"
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9.5)
-    table.scale(1.2, 1.8)
-    
-    for key, cell in table.get_celld().items():
-        if key[0] == 0:
-            cell.set_facecolor("#1f77b4")
-            cell.set_text_props(color="white", fontweight="bold")
-        else:
-            cell.set_facecolor("#f8f9fa" if key[0] % 2 == 0 else "white")
-
-    plt.suptitle("ENKI Backtest Error & Validation Summary", fontsize=14, fontweight="bold", y=0.92)
-    plt.tight_layout()
-    plt.savefig(str(output_path), dpi=dpi, bbox_inches="tight")
-    plt.close()
-    print(f"-> Backtest summary table PNG saved to: {output_path}")
-
-# ----------------------------------------------------------------------------- hand-off files for INANNA
-def save_backtest_draws(draws_by_year: dict, folder) -> None:
-    """One file per backtested election: ENKI's predicted booth x party primaries (from earlier elections only) plus the
-    ACTUAL booth votes, so INANNA can test the preference flows without importing or re-running ENKI."""
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-    for y, d in draws_by_year.items():
-        np.savez_compressed(folder / f"backtest_draws_{int(y)}.npz", booths=np.array(d["booths"]), parties=np.array(d["parties"]),
-                            booth_party_draws=d["booth_party_draws"], actual_party_votes=d["actual_party_votes"],
-                            actual_n=d["actual_n"])
-
-
-
-
-
 
 # ============================================================================= BLACKBOX:  ENKI(x) -> y
 # x = one dict (or a path to a .json file). EVERY variable in the system is a key in x; anything you leave out takes its
@@ -1279,14 +1088,6 @@ class ENKIOutput:
 
 _DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year")
 _SEQ_FIELDS = ("parties", "early_keywords", "exclude_booths", "scenario_pct")
-
-
-
-
-
-
-
-
 
 
 def _resolve(x):
@@ -1363,15 +1164,12 @@ def _seat_summary(res: ModelOutput, cfg: ModelConfig) -> pd.DataFrame:
     q.insert(0, "mean", res.draws_df.mean())
     return q
 
-
-
-
 def ENKI(x) -> ENKIOutput:
     """The blackbox. ENKI(x) -> y.  See the header above for what x may contain."""
     data, cfg, run, warnings_, sources = _resolve(x)
     y = ENKIOutput(config=json.loads(json.dumps(asdict(cfg), default=jsonable)),
-                   run=json.loads(json.dumps(asdict(run), default=jsonable)),
-                   data_sources=sources, warnings=warnings_)
+                run=json.loads(json.dumps(asdict(run), default=jsonable)),
+                data_sources=sources, warnings=warnings_)
     booth_df, state_df = data["booth_results"], data["state_results"]
 
     out_dir: Optional[Path] = None
