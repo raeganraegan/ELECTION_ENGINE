@@ -8,8 +8,12 @@
 !INANNA_V2.py
 !sample_booth_results.csv
 !sample_polls.csv
-!ENKI_HELPERS.py
+!share_models.py
 !ENKI_V3.py
-!ENKI_BACKTEST.py
+!share_model.py
+!/enki
+!/enki/*
+!/tests
+!/tests/*
 !/Showcase
 !/Showcase/*
