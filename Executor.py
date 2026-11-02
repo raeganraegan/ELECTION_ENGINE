@@ -13,7 +13,8 @@ def main():
         "onp_mode": "none",
         "onp_state_denominator": False,
 
-        # "output_root": "forecast_output",            # uncomment to write CSVs, plots and npz files
+        #keep else it doesnt generate anything at all.
+        "output_root": "forecast_output",            # uncomment to write CSVs, plots and npz files
     }
     return ENKI(balmain)
 
