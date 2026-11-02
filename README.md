@@ -141,9 +141,9 @@ This part of the document outlines the step-by-step mathematical model and equat
 
   * $m_k + \alpha_{kb}$ – Party baseline $m_k$ (log-odds against the reference party for an average booth) and booth-specific offset $\alpha_{kb}$
 
-  * $\beta_{kb}\,x^*_k$ – Statewide swing predictor scaled by the booth's own sensitivity
+  * $\beta_{kb}\thinspace x^{\ast}_k$ – Statewide swing predictor scaled by the booth's own sensitivity
 
-  * $d^*_k$ – Next-election step of the seat-wide tide ($\rho\, d_{kT} + \sqrt{1-\rho^2}\,\sigma_{d,k} z_d$ for AR(1); $d_{kT} + \sigma_{d,k} z_d$ for Random Walk)
+  * $d^{\ast}_k$ – Next-election step of the seat-wide tide ($\rho\thinspace  d_{kT} + \sqrt{1-\rho^2}\thinspace \sigma_{d,k} z_d$ for AR(1); $d_{kT} + \sigma_{d,k} z_d$ for Random Walk)
 
   * $\sigma_{\varepsilon,k} z_\varepsilon$ – Booth-level noise (or correlated multivariate shock $\mathbf{L}_{\Omega} \boldsymbol{z}_\varepsilon$)
 
@@ -159,7 +159,7 @@ This part of the document outlines the step-by-step mathematical model and equat
 
   * $a_b$ – Booth size (log-popularity) of booth $b$
 
-  * $\tau_t$ – Early-vote log-share level at election $t$ ($\tau'$ is the forecast value); $\text{early}_b \in \{0,1\}$ flags pre-poll / postal / declaration booths
+  * $\tau_t$ – Early-vote log-share level at election $t$ ($\tau'$ is the forecast value); $\text{early}_b \in \lbrace 0,1\rbrace$ flags pre-poll / postal / declaration booths
 
   * $\kappa$ – Dirichlet concentration of booth shares around their expected values
 
@@ -274,7 +274,7 @@ $$
 
 #### Priors & Dynamics:
 
-* **Sensitivity (non-reference parties $k < K$):**
+* **Sensitivity (non-reference parties $k \lt  K$):**
 
 $$
 \mu_{\beta,k} \sim \mathcal{N}(\text{preset mean},\, \text{preset sd}), \qquad \sigma_{\beta,k} \sim \text{HalfNormal}(0.20), \qquad \beta_{kb} = \mu_{\beta,k} + \sigma_{\beta,k} z_{\beta,kb}
@@ -282,15 +282,15 @@ $$
 
 The `data` preset is mean 0.3, sd 0.30 (GRN sd 0.35); the `uniform` preset is mean 1.0, sd 0.15. Override any party with `beta_priors={"ALP": (mean, sd)}`. The reference party has no beta, so it has no prior. This is the only way to set beta priors.
 
-* **Intercepts:** $m_k \sim \mathcal{N}(m_{0,k},\, 1)$, where $m_{0,k}$ is the empirical log-ratio of party $k$ to the reference.
+* **Intercepts:** $m_k \sim \mathcal{N}(m_{0,k},\thinspace  1)$, where $m_{0,k}$ is the empirical log-ratio of party $k$ to the reference.
 
 * **Booth offsets and noise:** $\alpha_{kb} = \sigma_{\alpha,k} z, \quad \varepsilon_{kbt} = \sigma_{\varepsilon,k} z$ with $\sigma_{\alpha,k} \sim \text{HalfNormal}(0.25/\sqrt{2})$ and $\sigma_{\varepsilon,k} \sim \text{HalfNormal}(s_\varepsilon/\sqrt{2})$.
 
 * **Seat tide process (`tide_process`):**
 
-  * **AR(1) Tide (`"ar1"`):** $d_{k,1} = \sigma_{d,k} z_1, \quad d_{kt} = \rho\, d_{k,t-1} + \sqrt{1-\rho^2}\,\sigma_{d,k}\, z_t$, with $\rho \sim \text{Beta}(2, 2)$.
+  * **AR(1) Tide (`"ar1"`):** $d_{k,1} = \sigma_{d,k} z_1, \quad d_{kt} = \rho\thinspace  d_{k,t-1} + \sqrt{1-\rho^2}\thinspace \sigma_{d,k}\thinspace  z_t$, with $\rho \sim \text{Beta}(2, 2)$.
 
-  * **Random Walk (`"random_walk"`):** $d_{k,1} = \sigma_{d,k} z_1, \quad d_{kt} = d_{k,t-1} + \sigma_{d,k}\, z_t$, modeling secular multi-cycle structural drift.
+  * **Random Walk (`"random_walk"`):** $d_{k,1} = \sigma_{d,k} z_1, \quad d_{kt} = d_{k,t-1} + \sigma_{d,k}\thinspace  z_t$, modeling secular multi-cycle structural drift.
 
 * **Correlated Shocks (`use_correlated_errors=True`):**
   Uses an LKJ Cholesky decomposition factor:
@@ -301,9 +301,12 @@ $$
 
 Only the unit-scale factor of the LKJ matrix is used (the scale of the shocks is carried by $\sigma_d$ and $\sigma_\varepsilon$, so it is not counted twice), and the same factor correlates the shocks in the forecast. To transform standard normal draws via the mapping:
 
-$$\mathbf{z}_{t} \longrightarrow \mathbf{L}_{\Omega} \mathbf{z}_{t}$$
+$$
+\mathbf{z}_{t} \longrightarrow \mathbf{L}_{\Omega} \mathbf{z}_{t}
+$$
 
 modeling structured inter-party leakage.
+
 * **Hyperparameters:** $\sigma_{d,k} \sim \text{LogNormal}\left(\ln s_d - \tfrac{1}{2}\ln 2,\ 0.7\right)$. The scales $s_d$ and $s_\varepsilon$ are **auto-calibrated from the seat's own history** when `sigma_d_median` / `sigma_eps_sd` are `None` (the default): $s_d$ = 1.225 x the mean sd over elections of the seat's log share (clipped to 0.05-0.35), $s_\varepsilon$ = 0.8 x the mean sd over booths of raw share (clipped to 0.01-0.15). Set a number to fix either one. This is empirical Bayes (the data informs both prior and posterior), a heuristic rather than a derivation.
 
 ### 2. Polling Aggregation
@@ -336,17 +339,17 @@ $$
 
 ### 3. Local Tide
 
-* **What it does:** Combines the statewide swing $x^*_k$ with the next step of the seat's tide $d^*_k$ into a party shift that differs by booth.
+* **What it does:** Combines the statewide swing $x^{\ast}_k$ with the next step of the seat's tide $d^{\ast}_k$ into a party shift that differs by booth.
 
 * **Why we do it:** State tides push parties up or down, but each booth absorbs that swing at its own rate, and the seat also has its own persistent local trend.
 
-* **Swing:** $x^*_k = \ln S_k - \overline{\ln S_k}$
+* **Swing:** $x^{\ast}_k = \ln S_k - \overline{\ln S_k}$
 
-* **Next tide step ($d^*_k$):**
+* **Next tide step ($d^{\ast}_k$):**
 
-  * Under AR(1): $d^*_k = \rho\, d_{kT} + \sqrt{1-\rho^2}\,\sigma_{d,k} z_d$
+  * Under AR(1): $d^{\ast}_k = \rho\thinspace  d_{kT} + \sqrt{1-\rho^2}\thinspace \sigma_{d,k} z_d$
 
-  * Under Random Walk: $d^*_k = d_{kT} + \sigma_{d,k} z_d$
+  * Under Random Walk: $d^{\ast}_k = d_{kT} + \sigma_{d,k} z_d$
 
 * **Shift:**
 
@@ -442,7 +445,7 @@ I'm currently working on the following (ticked off if completed):
 
 * [x] **Move Backtests out of ENKI** (`enki/backtest.py`; no circular imports).
 
-* [x] **Implement Hierarchical Booth Random Slopes (**$\beta_{kb}$**)**.
+* [x] **Implement Hierarchical Booth Random Slopes** ($\beta_{kb}$).
 
 * [x] **Implement Secular Random Walk Dynamics & Correlated Party Shocks (Phase 1 Update)**.
 
