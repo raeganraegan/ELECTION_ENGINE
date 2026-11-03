@@ -191,7 +191,7 @@ def _write_forecast(y: ENKIOutput, res: Forecast, cfg: ModelConfig, run: RunOpti
         for fname, fn in figs.items():
             _guarded(y, f"plot {fname}", lambda fn=fn, fname=fname: fn(out / fname))
             y.files[fname] = str(out / fname)
-    res.save(out)
+    res.save(out, cfg)
     if res.trace:
         save_trace(out, res.trace)
         y.files["trace"] = str(out / "trace.npz")
@@ -221,6 +221,7 @@ def ENKI(x) -> ENKIOutput:
     df = prepare_booths(data["booth_results"], cfg)          # cleaned and checked once; every stage below reads this table
     state_df = data["state_results"]
 
+    bt = None
     if run.run_backtest:
         log.info("RUNNING HISTORICAL BACKTEST")
         spec = BacktestSpec(run.backtest_state_mode, run.backtest_volume_mode, data.get("backtest_polls"), run.backtest_poll_horizon_days,
@@ -241,6 +242,7 @@ def ENKI(x) -> ENKIOutput:
         res = run_forecast(df, state_df, data["polls"], cfg, data.get("projected_formal_votes"), data.get("target_year"),
                            run.run_attribution, run.record_trace)
         y.forecast, y.trace = res, res.trace
+        res.backtest_result = bt      # None when run_backtest is off
         if res.trace is not None:
             y.warnings += check_trace(res.trace)
         y.seat_summary = _seat_summary(res, cfg)

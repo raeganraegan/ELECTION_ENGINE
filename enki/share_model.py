@@ -146,16 +146,24 @@ def fit_share_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFrame) 
     coords = {"booth": des.booth_names, "year": des.years, "obs": np.arange(N), "party": parties}
 
     with pm.Model(coords=coords):
-        # STRUCTURAL FIX 1: Sum-to-zero priors for party sensitivities and intercepts across all K parties
-        mu_beta_raw = pm.Normal("mu_beta_raw", mu=0.0, sigma=0.5, shape=K)
+        # Party sensitivities to their own statewide log-swing, sum-to-zero across all K parties.
+        # Priors come from beta_prior_table (beta_preset / beta_priors) and are placed on the PRE-centring values.
+        # The reference party has no entry in that table, so its raw prior mean is set to minus the sum of the others
+        # (raw means then sum to 0 and centring does not shift the stated prior means), with the average of their sds.
+        prior_mu = np.array([priors[p][0] for p in parties[:-1]], dtype=float)
+        prior_sd = np.array([priors[p][1] for p in parties[:-1]], dtype=float)
+        raw_mu = np.append(prior_mu, -prior_mu.sum())
+        raw_sd = np.append(prior_sd, prior_sd.mean())
+        mu_beta_raw = pm.Normal("mu_beta_raw", mu=raw_mu, sigma=raw_sd, shape=K)
         mu_beta = pm.Deterministic("mu_beta_vec", mu_beta_raw - mu_beta_raw.mean(), dims="party")
-        
+
         sigma_beta = pm.HalfNormal("sigma_beta", sigma=cfg.sigma_beta_sd, shape=K)
         beta_z = pm.Normal("beta_z", 0.0, 1.0, dims=("booth", "party"))
         beta_matrix = pm.Deterministic(
             "beta_matrix", mu_beta[None, :] + beta_z * sigma_beta[None, :], dims=("booth", "party"))
 
-        m_raw = pm.Normal("m_raw", mu=m0, sigma=3.0, shape=K)
+        # Seat-level intercepts: sum-to-zero, prior sd from cfg.m_prior_sd
+        m_raw = pm.Normal("m_raw", mu=m0, sigma=cfg.m_prior_sd, shape=K)
         m = pm.Deterministic("m", m_raw - m_raw.mean(), dims="party")
         
         sigma_alpha = pm.HalfNormal("sigma_alpha", sigma=cfg.sigma_alpha_sd / np.sqrt(2.0), dims="party")

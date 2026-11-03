@@ -20,7 +20,6 @@ from .pipeline import Stages, build_trace
 from .polls import draw_statewide, summarise_polls
 from .share_model import fit_share_model, simulate_shares
 from .volume_model import resolve_volumes
-from .backtest import backtest_shares, backtest_volumes, BacktestSpec
 from .plots import seat_distribution_plot, backtest_distribution_validation_plot
 
 log = logging.getLogger("enki")
@@ -230,14 +229,7 @@ def run_forecast(df: pd.DataFrame, state_df: pd.DataFrame, poll: Union[PollInput
     seat_all = 100.0 * np.einsum("db,dbk->dk", Vk, Pk) / Vk.sum(axis=1, keepdims=True)         # Step 7
     st = Stages(cfg, df, fit, polls, stw, sim, onp, vol, keep, kept_names, seat_all, last_n)
 
-    # Run backtest if requested in config or defaults
-    bt_result = None
-    if getattr(cfg, "run_backtest", True):
-        spec = BacktestSpec(state_mode=getattr(cfg, "backtest_state_mode", "auto"),
-                            volume_mode=getattr(cfg, "backtest_volume_mode", "actual"),
-                            polls=poll if isinstance(poll, pd.DataFrame) else None,
-                            horizon_days=getattr(cfg, "backtest_poll_horizon_days", None))
-        bt_result = backtest_shares(df, state_df, cfg, return_draws=True, spec=spec)
+    bt_result = None        # attached by api.ENKI after its single backtest run (the backtest is a RunOptions concern, not a model one)
 
     return Forecast(
         params=_params(st, k0), booths=_booth_effects_table(st, k0), tide=_tide_table(st),

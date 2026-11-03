@@ -25,8 +25,8 @@ def print_run_report(y, cfg: ModelConfig) -> None:
     p = res.params
     print(f"\nDiagnostics: max r_hat={p['rhat_max']:.3f}, min ESS={p['ess_bulk_min']:.0f}, divergences={p['divergences']} "
           f"(volume model: {p.get('volume_divergences', 'n/a')})")
-    print("beta (sensitivity to the party's own statewide log-share swing): posterior vs prior")
+    print("beta (sum-to-zero across parties; sensitivity to the party's own statewide log-share swing): posterior vs prior (prior is on the pre-centring value)")
     priors = beta_prior_table(cfg)
     for q in cfg.parties:
-        prior = f"prior {priors[q][0]:.2f} +/- {priors[q][1]:.2f}" if q in priors else "reference party: fixed at 0"
+        prior = f"prior {priors[q][0]:.2f} +/- {priors[q][1]:.2f}" if q in priors else "reference party: implied by sum-to-zero centring"
         print(f"  {q:6s}: {p[f'beta_{q}']:.2f} +/- {p[f'beta_{q}_sd']:.2f}   ({prior})")

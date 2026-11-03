@@ -1,10 +1,11 @@
 # 1. Ignore everything in the root directory
 *
 
-# 2. Whitelist your specific files
+# 2. Whitelist specific files
 !.gitignore
 !README.md
 !executor.py
+!Executor.py
 !sample_booth_results.csv
 !sample_polls.csv
 !/backtest.py
