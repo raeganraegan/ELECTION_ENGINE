@@ -115,6 +115,12 @@ class ModelConfig:
     onp_seat_ratio_sdlog: float = 0.5
     onp_max_seat_share: float = 1.0
 
+    # ---- OPV step (Step 8): finalists + preference flows -> two-candidate-preferred and exhaustion
+    opv_flows: Optional[Dict[str, Dict[str, Sequence[float]]]] = None   # {"ALP_vs_LNP": {"GRN": [to ALP, to LNP, exhausted], ...}, ...}; None -> data.NSW_PREF_FLOWS
+    opv_flow_conc: Optional[float] = None                      # None: flow rates fixed; a number: each draw's rates ~ Dirichlet(conc * rates) (smaller = more flow uncertainty)
+    opv_finalist_exclude: Sequence[str] = ("OTHER",)           # catch-all buckets that cannot be a finalist
+    opv_min_pair_prob: float = 0.9                             # warn when the reported finalist pairing occurs in fewer draws than this
+
 
 BRIAN_DEFAULT: Dict[str, float] = {"LNP": 0.20, "ALP": 0.05}
 
@@ -131,6 +137,7 @@ class RunOptions:
     run_volume_backtest: bool = False
     backtest_volume_sims: int = 4000
     run_attribution: bool = True                               # which uncertainty layer drives the seat band
+    run_opv: bool = True                                       # Step 8: OPV count (needs run_forecast)
     output_root: Optional[str] = None
     make_plots: bool = True
     print_report: bool = True
@@ -255,6 +262,10 @@ def validate(cfg: ModelConfig, run: RunOptions) -> List[str]:
     except Exception:
         err.append("prediction_date / election_date must be parseable dates (YYYY-MM-DD).")
 
+    if cfg.opv_flow_conc is not None and not float(cfg.opv_flow_conc) > 0.0:
+        err.append("opv_flow_conc must be > 0 (or None for fixed flows).")
+    if not 0.0 <= float(cfg.opv_min_pair_prob) <= 1.0:
+        err.append("opv_min_pair_prob must be between 0 and 1.")
     if run.backtest_state_mode not in BACKTEST_STATE_MODES:
         err.append(f"backtest_state_mode must be one of {BACKTEST_STATE_MODES}.")
     if run.backtest_volume_mode not in BACKTEST_VOLUME_MODES:

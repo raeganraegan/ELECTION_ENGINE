@@ -268,3 +268,135 @@ def backtest_distribution_validation_plot(draws_dict: dict, target_party: str, o
     ax.spines["bottom"].set_linewidth(2)
     plt.tight_layout()
     _finish(output_path, dpi)
+
+# ----------------------------------------------------------------------------- OPV step (Step 8) figures
+# The same five figures INANNA_V2 drew. Booth figures are for the most frequent finalist pairing (opv.report_pair).
+def _pair_cols(o):
+    a, b = o.report_pair
+    return a, b, PARTY_COLORS.get(a, "#E13940"), PARTY_COLORS.get(b, "#0047AB")
+
+
+def opv_first_preference_breakdown(o, output_path, dpi: int = 300) -> None:
+    """Stacked first-preference shares per booth (mean over all draws), sorted by the reported party's share."""
+    a, _, _, _ = _pair_cols(o)
+    sns.set_theme(style="whitegrid")
+    pref = o.booth_primary_mean.sort_values(a if a in o.booth_primary_mean.columns else o.booth_primary_mean.columns[0], ascending=True)
+    fig, ax = plt.subplots(figsize=(12, 8))
+    y = np.arange(len(pref))
+    left = np.zeros(len(pref))
+    for p in pref.columns:
+        ax.barh(y, pref[p].values, left=left, color=PARTY_COLORS.get(p, "#333333"), label=f"{p} Primary (%)", edgecolor="white")
+        left += pref[p].values
+    ax.set_yticks(y)
+    ax.set_yticklabels(pref.index, fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("Percentage of First Preference Formal Votes (%)", fontsize=11, fontweight="bold")
+    ax.set_title(f"Raw First Preference Vote Shares by Voting Booth (Sorted by {a})", fontsize=13, fontweight="bold", pad=15)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, facecolor="white", edgecolor="none")
+    ax.set_xlim(0, 100)
+    plt.tight_layout()
+    _finish(output_path, dpi)
+
+
+def opv_2cp_breakdown(o, output_path, dpi: int = 300) -> None:
+    """Final two-candidate shares and the exhausted share, as a percentage of ALL formal votes in each booth."""
+    a, b, ca, cb = _pair_cols(o)
+    sns.set_theme(style="whitegrid")
+    d = o.booth_2cp.copy()
+    ev = d["expected_formal_votes"].clip(lower=1.0)
+    d["pa"], d["pb"], d["pe"] = 100 * d[f"{a}_2cp_votes_mean"] / ev, 100 * d[f"{b}_2cp_votes_mean"] / ev, 100 * d["exhausted_votes_mean"] / ev
+    d = d.sort_values("pa", ascending=True)
+    fig, ax = plt.subplots(figsize=(12, 8))
+    y = np.arange(len(d))
+    ax.barh(y, d["pa"], color=ca, label=f"{a} Final Share (%)", edgecolor="white")
+    ax.barh(y, d["pb"], left=d["pa"], color=cb, label=f"{b} Final Share (%)", edgecolor="white")
+    ax.barh(y, d["pe"], left=d["pa"] + d["pb"], color="#708090", label="Exhausted Share (%)", edgecolor="white")
+    ax.set_yticks(y)
+    ax.set_yticklabels(d["booth"], fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("Percentage of Total Formal Votes (%)", fontsize=11, fontweight="bold")
+    ax.set_title(f"Final Two-Candidate ({a} vs {b}) & Exhausted Vote Shares by Booth", fontsize=13, fontweight="bold", pad=15)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, facecolor="white", edgecolor="none")
+    ax.set_xlim(0, 100)
+    plt.tight_layout()
+    _finish(output_path, dpi)
+
+
+def opv_uncertainty_forest(o, output_path, dpi: int = 300) -> None:
+    """Per-booth 2CP share of the reported party: mean and 90% interval across draws."""
+    a, b, ca, _ = _pair_cols(o)
+    sns.set_theme(style="whitegrid")
+    d = o.booth_2cp.dropna(subset=[f"{a}_2cp_share_mean"]).sort_values(f"{a}_2cp_share_mean", ascending=True)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    y = np.arange(len(d))
+    m = d[f"{a}_2cp_share_mean"]
+    ax.errorbar(m, y, xerr=[(m - d[f"{a}_2cp_p05"]).clip(lower=0), (d[f"{a}_2cp_p95"] - m).clip(lower=0)], fmt="o", color=ca, ecolor=ca,
+                elinewidth=2, capsize=4, label=f"{a} Mean & 90% CI")
+    ax.axvline(50.0, color="black", linestyle="--", linewidth=1.5, label="50% Majority Threshold")
+    ax.set_yticks(y)
+    ax.set_yticklabels(d["booth"], fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel(f"{a} Final Matchup Vote Share (%)", fontsize=11, fontweight="bold")
+    ax.set_title(f"Booth-Level {a} vs {b} Forecast Uncertainty (90% CI)", fontsize=13, fontweight="bold", pad=15)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, facecolor="white", edgecolor="none")
+    plt.tight_layout()
+    _finish(output_path, dpi)
+
+
+def opv_exhausted_scatter(o, output_path, dpi: int = 300) -> None:
+    """Exhausted share of formal votes against the reported party's 2CP share, one point per booth (size = expected votes)."""
+    a, _, ca, _ = _pair_cols(o)
+    d = o.booth_2cp.dropna(subset=[f"{a}_2cp_share_mean", "exhausted_share_of_total_mean"])
+    sizes = (d["expected_formal_votes"] / d["expected_formal_votes"].max()).to_numpy() * 400 + 30
+    sns.set_theme(style="whitegrid")
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.scatter(d[f"{a}_2cp_share_mean"], d["exhausted_share_of_total_mean"], s=sizes, alpha=0.65, color=ca)
+    if len(d) >= 3 and d[f"{a}_2cp_share_mean"].nunique() > 1:
+        k, c = np.polyfit(d[f"{a}_2cp_share_mean"], d["exhausted_share_of_total_mean"], 1)
+        xs = np.array([d[f"{a}_2cp_share_mean"].min(), d[f"{a}_2cp_share_mean"].max()])
+        ax.plot(xs, k * xs + c, color="black", linestyle="--", linewidth=1.5)
+    ax.set_xlabel(f"{a} Final Vote Share (%)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Exhausted Share of Formal Votes (%)", fontsize=11, fontweight="bold")
+    ax.set_title(f"Exhausted Ballot Rate vs. {a} Support Across Booths", fontsize=13, fontweight="bold", pad=15)
+    plt.tight_layout()
+    _finish(output_path, dpi)
+
+
+def _kde_or_line(vals, ax, label, color, lw) -> None:
+    vals = np.asarray(vals, dtype=float)
+    vals = vals[~np.isnan(vals)]
+    if len(vals) > 2 and np.ptp(vals) > 1e-9:
+        sns.kdeplot(x=vals, ax=ax, color=color, linewidth=lw, label=label, clip=(0, 100))
+    elif len(vals):
+        ax.axvline(float(vals.mean()), color=color, linewidth=lw, label=label)
+
+
+def opv_seat_outcome(o, output_path, dpi: int = 300) -> None:
+    """Seat-wide 2CP distributions of the reported pairing and the exhausted share, the 50% line with the reported party's
+    win chance over ALL draws (not just this pairing), and the reported party's quartiles within this pairing."""
+    a, b, ca, cb = _pair_cols(o)
+    sd = o.seat_draws
+    sub = sd[sd["pair"].isin([f"{a} v {b}", f"{b} v {a}"])]
+    va, vb, ex = sub[f"{a}_2CP_pct"].to_numpy(), sub[f"{b}_2CP_pct"].to_numpy(), sub["exhausted_pct_formal"].to_numpy()
+    q25, q50, q75 = np.nanpercentile(va, [25, 50, 75])
+    p_win = float(o.win_probs.get(a, 0.0))
+    sns.set_theme(style="white")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for label, vals, colour, lw in ((f"{a} Final Share", va, ca, 2.8), (f"{b} Final Share", vb, cb, 2.4), ("Exhausted Share", ex, "#708090", 2.2)):
+        _kde_or_line(vals, ax, label, colour, lw)
+    top = ax.get_ylim()[1] * 1.30
+    ax.set_ylim(0, top)
+    ax.vlines(50.0, 0, top * 0.88, colors="black", linestyles=":", linewidth=2.4)
+    ax.text(50.0, top * 0.90, f"50% Win Margin\n{a} WIN CHANCE: {100.0 * p_win:.1f}%", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    for val, lab, ha, dx, yfrac in ((q25, "p(0.25)", "right", -0.8, 0.50), (q50, "p(0.50)", "center", 0.0, 0.66), (q75, "p(0.75)", "left", 0.8, 0.50)):
+        ax.vlines(val, 0, top * (yfrac - 0.02), colors=ca, linestyles="--", linewidth=1.6)
+        ax.text(val + dx, top * yfrac, f"{a} {lab}\n{val:.1f}%", ha=ha, va="bottom", fontsize=9, fontweight="bold", color=ca,
+                bbox=dict(facecolor="white", edgecolor="none", pad=1.5))
+    ax.set_xlim(0, 100)
+    ax.set_title(f"Likely Overall Outcome of the Seat ({a} vs {b}, {100 * o.report_pair_prob:.0f}% of draws)", fontsize=14, fontweight="bold", pad=18)
+    ax.set_xlabel("OPV Vote Share (%)", fontsize=11, fontweight="bold", labelpad=8)
+    ax.set_ylabel("Probability", fontsize=11, fontweight="bold", labelpad=8)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=False)
+    sns.despine(top=True, right=True)
+    plt.tight_layout()
+    _finish(output_path, dpi)

@@ -23,18 +23,20 @@ from .data import NSW_STATE_RESULTS, prepare_booths, read_frame
 from .forecast import Forecast, run_forecast
 from .io import (append_history, jsonable, load_x, output_folder, save_actual_primaries, save_backtest_draws,
                  save_run_meta, save_trace)
+from .opv import check_flows, resolve_flows
 from .pipeline import check_trace
 from .report import print_run_report
 
 log = logging.getLogger("enki")
 _DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year", "backtest_polls", "election_dates")
-_TUPLE_FIELDS = ("parties", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
+_TUPLE_FIELDS = ("parties", "opv_finalist_exclude", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
 
 
 @dataclass
 class ENKIOutput:
     forecast: Optional[Forecast] = None
     seat_summary: Optional[pd.DataFrame] = None         # seat-wide share per party: mean + scenario percentiles
+    opv: Optional[Any] = None                           # OpvResult: finalists, 2CP, exhaustion, P(win)
     backtest: Optional[pd.DataFrame] = None
     backtest_draws: Optional[dict] = None
     volume_backtest: Optional[pd.DataFrame] = None
@@ -98,6 +100,8 @@ def resolve(x) -> Resolved:
         cfg_kw["prediction_date"] = date.today().strftime("%Y-%m-%d")
     cfg, run = ModelConfig(**cfg_kw), RunOptions(**run_kw)
     warnings_ = validate(cfg, run)
+    if run.run_forecast and run.run_opv:
+        warnings_ += check_flows(resolve_flows(cfg), cfg)          # bad flow tables fail here, before any sampling
 
     if flat.get("booth_results") is None:
         raise KeyError("ENKI(x): 'booth_results' is required (DataFrame or CSV path).")
@@ -179,6 +183,25 @@ def _write_backtests(y: ENKIOutput, run: RunOptions, out: Path) -> None:
         y.files["backtest_table_png"] = str(png)
 
 
+def _write_opv(y: ENKIOutput, res: Forecast, run: RunOptions, out: Path) -> None:
+    o = res.opv
+    d = out / "opv"
+    d.mkdir(parents=True, exist_ok=True)
+    for name, table, idx in (("booth_2cp", o.booth_2cp, False), ("seat_2cp_draws", o.seat_draws, False),
+                             ("finalist_pair_probs", o.pair_probs, True), ("win_probs", o.win_probs, True)):
+        table.to_csv(d / f"{name}.csv", index=idx)
+        y.files[f"opv_{name}"] = str(d / f"{name}.csv")
+    if run.make_plots:
+        figs = {"booth_raw_first_preference_breakdown.png": plots.opv_first_preference_breakdown,
+                "booth_2cp_exhausted_breakdown.png": plots.opv_2cp_breakdown,
+                "booth_2cp_uncertainty_forest.png": plots.opv_uncertainty_forest,
+                "exhausted_vs_support_scatter.png": plots.opv_exhausted_scatter,
+                "seat_outcome_distribution.png": plots.opv_seat_outcome}
+        for fname, fn in figs.items():
+            _guarded(y, f"plot opv/{fname}", lambda fn=fn, fname=fname: fn(o, d / fname, run.plot_dpi))
+            y.files[f"opv_{fname}"] = str(d / fname)
+
+
 def _write_forecast(y: ENKIOutput, res: Forecast, cfg: ModelConfig, run: RunOptions, out: Path, seat_folder: Path, sources: dict) -> None:
     if run.make_plots:
         figs = {
@@ -199,6 +222,8 @@ def _write_forecast(y: ENKIOutput, res: Forecast, cfg: ModelConfig, run: RunOpti
     save_run_meta(out, cfg, sources.get("booth_results", ""), sources.get("polls", ""))
     y.seat_summary.to_csv(out / "seat_primary_summary.csv")
     append_history(res, seat_folder, cfg.prediction_date)
+    if res.opv is not None:
+        _write_opv(y, res, run, out)
     y.files["forecast_dir"] = str(out)
 
 
@@ -240,9 +265,14 @@ def ENKI(x) -> ENKIOutput:
     if run.run_forecast:
         log.info("RUNNING FORECAST: %s (target %s)", cfg.seat_name, cfg.election_date)
         res = run_forecast(df, state_df, data["polls"], cfg, data.get("projected_formal_votes"), data.get("target_year"),
-                           run.run_attribution, run.record_trace)
+                           run.run_attribution, run.record_trace, run.run_opv)
         y.forecast, y.trace = res, res.trace
         res.backtest_result = bt      # None when run_backtest is off
+        y.opv = res.opv
+        if res.opv_error:
+            y.warnings.append(f"OPV step failed (forecast unaffected): {res.opv_error}")
+        if res.opv is not None:
+            y.warnings += res.opv.warnings
         if res.trace is not None:
             y.warnings += check_trace(res.trace)
         y.seat_summary = _seat_summary(res, cfg)

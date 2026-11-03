@@ -16,6 +16,7 @@ import pandas as pd
 
 from .config import LAYERS, SCENARIOS, ModelConfig, PollInput
 from .onp import apply_onp
+from .opv import OPV_SEED_OFFSET, OpvResult, compute_opv, resolve_flows
 from .pipeline import Stages, build_trace
 from .polls import draw_statewide, summarise_polls
 from .share_model import fit_share_model, simulate_shares
@@ -44,6 +45,8 @@ class Forecast:
     attribution: Optional[pd.DataFrame] = None
     trace: Optional[dict] = None
     backtest_result: Optional[object] = None # BacktestResult if run
+    opv: Optional[OpvResult] = None          # Step 8 result (None when run_opv is off or the step failed)
+    opv_error: Optional[str] = None
 
     def save(self, folder: Union[str, Path], cfg: Optional[ModelConfig] = None) -> None:
         out = Path(folder)
@@ -204,7 +207,7 @@ def _params(st: Stages, k0: int) -> Dict[str, float]:
 # ----------------------------------------------------------------------------- the forecast
 def run_forecast(df: pd.DataFrame, state_df: pd.DataFrame, poll: Union[PollInput, pd.DataFrame], cfg: ModelConfig,
                  projected_formal_votes: Optional[pd.Series] = None, target_year: Optional[int] = None,
-                 run_attribution: bool = True, record_trace: bool = True) -> Forecast:
+                 run_attribution: bool = True, record_trace: bool = True, run_opv: bool = True) -> Forecast:
     """`df` is the prepared booth table (data.prepare_booths)."""
     parties = list(cfg.parties)
     k0 = parties.index(cfg.party)
@@ -227,7 +230,15 @@ def run_forecast(df: pd.DataFrame, state_df: pd.DataFrame, poll: Union[PollInput
     last_n = df[df["year"] == last_year].set_index("booth")["n"].reindex(fit.booth_names)
     Vk, Pk = vol.V[:, keep], onp.p[:, keep, :]
     seat_all = 100.0 * np.einsum("db,dbk->dk", Vk, Pk) / Vk.sum(axis=1, keepdims=True)         # Step 7
-    st = Stages(cfg, df, fit, polls, stw, sim, onp, vol, keep, kept_names, seat_all, last_n)
+    opv, opv_error = None, None                                                                 # Step 8 (own random stream)
+    if run_opv:
+        try:
+            opv = compute_opv(Vk, Pk * 100.0, onp.out_parties, kept_names, cfg, resolve_flows(cfg),
+                              np.random.default_rng(cfg.seed + OPV_SEED_OFFSET))
+        except Exception as e:                                                                   # never lose a forecast to the OPV step
+            opv_error = repr(e)
+            log.warning("OPV step failed: %s", opv_error)
+    st = Stages(cfg, df, fit, polls, stw, sim, onp, vol, keep, kept_names, seat_all, last_n, opv)
 
     bt_result = None        # attached by api.ENKI after its single backtest run (the backtest is a RunOptions concern, not a model one)
 
@@ -239,4 +250,4 @@ def run_forecast(df: pd.DataFrame, state_df: pd.DataFrame, poll: Union[PollInput
         booth_names=kept_names, volume_matrix=Vk, prepared_df=df, booth_party_draws=Pk * 100.0, party_names=onp.out_parties,
         diagnostics=fit.diag, attribution=uncertainty_attribution(st, k0) if run_attribution else None,
         trace=build_trace(st) if record_trace else None,
-        backtest_result=bt_result)
+        backtest_result=bt_result, opv=opv, opv_error=opv_error)

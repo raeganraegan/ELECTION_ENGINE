@@ -28,6 +28,14 @@ NSW_ELECTION_DATES = {1988: "1988-03-19", 1991: "1991-05-25", 1995: "1995-03-25"
                       2007: "2007-03-24", 2011: "2011-03-26", 2015: "2015-03-28", 2019: "2019-03-23", 2023: "2023-03-25"}
 
 
+# NSW preference flows for the OPV step, [to first-named party, to second-named party, exhausted] per source party.
+# Based on Antony Green's NSW 2019 preference-flow tables. UNVERIFIED seat-by-seat: replace with your own via `opv_flows`.
+NSW_PREF_FLOWS = {
+    "ALP_vs_LNP": {"GRN": [0.525, 0.078, 0.397], "ONP": [0.109, 0.180, 0.711], "OTHER": [0.205, 0.185, 0.610]},
+    "ALP_vs_GRN": {"LNP": [0.100, 0.100, 0.800], "ONP": [0.100, 0.100, 0.800], "OTHER": [0.300, 0.300, 0.400]},
+}
+
+
 def read_frame(v, name: str) -> pd.DataFrame:
     """DataFrame | CSV path | list/dict of records -> DataFrame (always a copy)."""
     if isinstance(v, pd.DataFrame):

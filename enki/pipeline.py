@@ -13,9 +13,11 @@ import numpy as np
 import pandas as pd
 
 from .config import ModelConfig, beta_prior_table
+from .opv import opv_trace
 
 if TYPE_CHECKING:
     from .onp import OnpResult
+    from .opv import OpvResult
     from .polls import PollSummary, StatewideDraws
     from .share_model import ShareFit, ShareSim
     from .volume_model import VolumeResult
@@ -47,9 +49,12 @@ PIPELINE_STEPS: List[Dict[str, Any]] = [
     dict(id="S7", name="Seat", pos=(8.8, 0.9), what="volume-weighted seat shares and percentiles",
          eq="s_k = sum_b V_b p'_kb / sum_b V_b", inputs="V, p'_b", outputs="seat shares (D x K+1)",
          trace=["s7_seat_draws", "s7_out_parties"]),
+    dict(id="S8", name="OPV", pos=(12.2, 0.9), what="finalists + preference flows -> 2CP, exhaustion, P(win)", optional=True,
+         eq="2CP_a = (v_a + sum_k f_ka v_k) / (v_a + v_b + sum_k (f_ka + f_kb) v_k)", inputs="V, p'_b, flow tables", outputs="2CP, exhausted, winner",
+         trace=["s8_eligible", "s8_pair", "s8_2cp", "s8_exhausted", "s8_winner"]),
 ]
 PIPELINE_EDGES = [("S0", "S1", "solid"), ("S1", "S3", "solid"), ("S2", "S3", "solid"), ("S3", "S4", "solid"),
-                  ("S4", "S6", "solid"), ("S6", "S7", "solid"), ("S5", "S7", "solid"), ("S0", "S5", "dashed")]
+                  ("S4", "S6", "solid"), ("S6", "S7", "solid"), ("S5", "S7", "solid"), ("S6", "S8", "solid"), ("S5", "S8", "solid"), ("S0", "S5", "dashed")]
 
 
 @dataclass
@@ -67,6 +72,7 @@ class Stages:
     kept_names: list
     seat_all: np.ndarray
     last_n: pd.Series
+    opv: Optional["OpvResult"] = None
 
 
 def build_trace(st: Stages) -> Dict[str, Any]:
@@ -100,6 +106,8 @@ def build_trace(st: Stages) -> Dict[str, Any]:
     }
     if st.polls.table is not None:
         trace["s2_poll_table"] = st.polls.table
+    if st.opv is not None:
+        trace.update(opv_trace(st.opv))
     return trace
 
 
@@ -108,4 +116,4 @@ def check_trace(trace: Optional[dict]) -> List[str]:
     if not trace:
         return ["trace is empty: the process report has nothing to draw."]
     return [f"trace step {s['id']} ({s['name']}) is missing: {', '.join(k for k in s['trace'] if k not in trace)}"
-            for s in PIPELINE_STEPS if any(k not in trace for k in s["trace"])]
+            for s in PIPELINE_STEPS if any(k not in trace for k in s["trace"]) and not (s.get("optional") and not any(k in trace for k in s["trace"]))]
