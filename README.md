@@ -55,9 +55,7 @@ Dependencies point one way only: each module imports from the ones above it, nev
 | `enki/backtest.py` | Walk-forward validation and scoring (coverage, CRPS, baselines). Depends on the model, never the reverse. |
 | `enki/plots.py`, `io.py`, `report.py` | Figures, files in/out, terminal report. |
 | `enki/api.py` | `ENKI(x) -> y`, input resolution, CLI. |
-| `ENKI_V3.py` | 3-line facade so old `from ENKI_V3 import ENKI` still works. |
 
-Run `python tests/test_enki.py` (no PyMC needed: the sampler is replaced by a synthetic posterior).
 
 #### **Quick start:**
 

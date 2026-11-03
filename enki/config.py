@@ -50,7 +50,7 @@ class ModelConfig:
     exclude_booths: Sequence[str] = ("NONE",)
     booth_merge: Optional[Dict[str, str]] = None               # {"old venue": "new venue"} merged BEFORE fitting
     early_keywords: Sequence[str] = ("PRE-POLL", "PREPOLL", "PRE POLL", "EARLY", "POSTAL", "DECLARATION",
-                                     "ABSENT", "IVOTE", "SPECIAL", "MOBILE")
+                                    "ABSENT", "IVOTE", "SPECIAL", "MOBILE")
     data_check_jump_threshold: float = 0.15                    # warn when the seat's formal total jumps by more than this
 
     # ---- share-model priors
@@ -71,11 +71,11 @@ class ModelConfig:
     include_eps: bool = True                                   # booth-election noise in predictive draws
 
     # ---- MCMC
-    draws: int = 2000
-    tune: int = 2000
-    chains: int = 4
+    draws: int = 500 #NOTE: NORMALLY 2000, SHORTENED FOR TESTING
+    tune: int = 500 #NOTE: NORMALLY 2000, SORTENED FOR TESTING
+    chains: int = 2 #NOTE: NORMALLY 4, SEE ABOVE
     seed: int = 42
-    target_accept: float = 0.99
+    target_accept: float = 0.95 #NOTE NORMALLY 0.99 SEE ABOVE
     rhat_threshold: float = 1.01
     ess_threshold: float = 400.0
 

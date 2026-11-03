@@ -20,6 +20,8 @@ from .pipeline import Stages, build_trace
 from .polls import draw_statewide, summarise_polls
 from .share_model import fit_share_model, simulate_shares
 from .volume_model import resolve_volumes
+from .backtest import backtest_shares, backtest_volumes, BacktestSpec
+from .plots import seat_distribution_plot, backtest_distribution_validation_plot
 
 log = logging.getLogger("enki")
 ATTRIBUTION_SEED_OFFSET = 101
@@ -42,22 +44,57 @@ class Forecast:
     diagnostics: Optional[pd.DataFrame] = None
     attribution: Optional[pd.DataFrame] = None
     trace: Optional[dict] = None
+    backtest_result: Optional[object] = None # BacktestResult if run
 
-    def save(self, folder: Union[str, Path]) -> None:
+    def save(self, folder: Union[str, Path], cfg: Optional[ModelConfig] = None) -> None:
         out = Path(folder)
-        out.mkdir(parents=True, exist_ok=True)
-        pd.Series(self.params, name="value").to_csv(out / "params.csv")
-        self.booths.to_csv(out / "booths.csv", index=False)
-        self.tide.to_csv(out / "tide.csv", index=False)
-        self.booth_forecast.to_csv(out / "forecast.csv", index=False)
-        self.seat.to_csv(out / "seat.csv", index=False)
+        live_out = out / "live_2027"
+        live_out.mkdir(parents=True, exist_ok=True)
+        
+        pd.Series(self.params, name="value").to_csv(live_out / "params.csv")
+        self.booths.to_csv(live_out / "booths.csv", index=False)
+        self.tide.to_csv(live_out / "tide.csv", index=False)
+        self.booth_forecast.to_csv(live_out / "forecast.csv", index=False)
+        self.seat.to_csv(live_out / "seat.csv", index=False)
         if self.diagnostics is not None:
-            self.diagnostics.to_csv(out / "diagnostics.csv", index=False)
+            self.diagnostics.to_csv(live_out / "diagnostics.csv", index=False)
         if self.attribution is not None:
-            self.attribution.to_csv(out / "uncertainty_attribution.csv", index=False)
-        np.savez_compressed(out / "volume_draws.npz", names=np.array(self.booth_names), V=self.volume_matrix)
-        np.savez_compressed(out / "booth_party_draws.npz", booth_party_draws=self.booth_party_draws,
+            self.attribution.to_csv(live_out / "uncertainty_attribution.csv", index=False)
+        np.savez_compressed(live_out / "volume_draws.npz", names=np.array(self.booth_names), V=self.volume_matrix)
+        np.savez_compressed(live_out / "booth_party_draws.npz", booth_party_draws=self.booth_party_draws,
                             booths=np.array(self.booth_names), parties=np.array(self.party_names))
+        
+        # Save live distribution plot
+        seat_distribution_plot(self, cfg.party if cfg else self.party_names[0], live_out / "seat_distribution.png")
+
+        # Save backtests into structured per-year folders if available
+        if self.backtest_result is not None:
+            bt_root = out / "backtests"
+            bt_root.mkdir(parents=True, exist_ok=True)
+            tbl = self.backtest_result.table
+            
+            for tgt_year, draws_dict in self.backtest_result.draws.items():
+                year_dir = bt_root / str(tgt_year)
+                year_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save per-year backtest row summary JSON/CSV
+                row_df = tbl[tbl["target"] == tgt_year]
+                if not row_df.empty:
+                    row_df.to_json(year_dir / "backtest_summary.json", orient="records", indent=2)
+                    row_df.to_csv(year_dir / "backtest_summary.csv", index=False)
+                
+                # Save per-year npz draws
+                np.savez_compressed(
+                    year_dir / f"backtest_draws_{tgt_year}.npz",
+                    booths=np.array(draws_dict["booths"]),
+                    parties=np.array(draws_dict["parties"]),
+                    booth_party_draws=draws_dict["booth_party_draws"],
+                    actual_party_votes=draws_dict["actual_party_votes"],
+                    actual_n=draws_dict["actual_n"]
+                )
+                
+                # Generate validation distribution plot with actual outcome dashed lines
+                backtest_distribution_validation_plot(draws_dict, cfg.party if cfg else "ALP", year_dir / "seat_distribution_validation.png")
 
 
 # ----------------------------------------------------------------------------- uncertainty attribution
@@ -193,6 +230,15 @@ def run_forecast(df: pd.DataFrame, state_df: pd.DataFrame, poll: Union[PollInput
     seat_all = 100.0 * np.einsum("db,dbk->dk", Vk, Pk) / Vk.sum(axis=1, keepdims=True)         # Step 7
     st = Stages(cfg, df, fit, polls, stw, sim, onp, vol, keep, kept_names, seat_all, last_n)
 
+    # Run backtest if requested in config or defaults
+    bt_result = None
+    if getattr(cfg, "run_backtest", True):
+        spec = BacktestSpec(state_mode=getattr(cfg, "backtest_state_mode", "auto"),
+                            volume_mode=getattr(cfg, "backtest_volume_mode", "actual"),
+                            polls=poll if isinstance(poll, pd.DataFrame) else None,
+                            horizon_days=getattr(cfg, "backtest_poll_horizon_days", None))
+        bt_result = backtest_shares(df, state_df, cfg, return_draws=True, spec=spec)
+
     return Forecast(
         params=_params(st, k0), booths=_booth_effects_table(st, k0), tide=_tide_table(st),
         booth_forecast=_booth_forecast_table(st, k0), seat=_seat_table(st, k0),
@@ -200,4 +246,5 @@ def run_forecast(df: pd.DataFrame, state_df: pd.DataFrame, poll: Union[PollInput
         booth_draws_df=pd.DataFrame(100.0 * sim.p[:, keep, k0] * onp.target_scale[:, None], columns=kept_names),
         booth_names=kept_names, volume_matrix=Vk, prepared_df=df, booth_party_draws=Pk * 100.0, party_names=onp.out_parties,
         diagnostics=fit.diag, attribution=uncertainty_attribution(st, k0) if run_attribution else None,
-        trace=build_trace(st) if record_trace else None)
+        trace=build_trace(st) if record_trace else None,
+        backtest_result=bt_result)

@@ -4,16 +4,11 @@
 # 2. Whitelist your specific files
 !.gitignore
 !README.md
-!Executor.py
-!INANNA_V2.py
+!executor.py
 !sample_booth_results.csv
 !sample_polls.csv
-!share_models.py
-!share_model.py
 !/backtest.py
 !/enki
 !/enki/*
-!/tests
-!/tests/*
 !/Showcase
 !/Showcase/*

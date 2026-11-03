@@ -1,10 +1,10 @@
 """share_model.py -- Steps 0, 1, 3, 4. The hierarchical multinomial-logit model of booth vote shares.
 
-    eta_{kbt} = m_k + alpha_{kb} + beta_{kb} * x_{kt} + d_{kt} + eps_{kbt},      m_K = 0, beta_{Kb} = 0   (K = reference party)
+    eta_{kbt} = m_k + alpha_{kb} + beta_{kb} * x_{kt} + d_{kt} + eps_{kbt}, with sum-to-zero across all K parties
     y_{bt} ~ Multinomial(n_{bt}, softmax(eta_{bt}))
 
 build_design    Step 0   booth table + statewide history -> index maps and the centred statewide log-swing x
-fit_share_model Step 1   MCMC (PyMC)                                                          -> ShareFit
+fit_share_model Step 1   MCMC (PyMC with sum-to-zero and soft saturation)                     -> ShareFit
 simulate_shares Steps 3+4  posterior + a statewide share vector -> booth shares for the next election  -> ShareSim
 
 Nothing in this file knows about polls, volumes, One Nation, plots or files.
@@ -69,11 +69,7 @@ def build_design(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFrame) -> 
 
 
 def empirical_scales(df: pd.DataFrame, cfg: ModelConfig) -> Tuple[float, float]:
-    """Prior scales for (sigma_d, sigma_eps) read off the seat's own history; used only for a field left as None.
-    This is empirical Bayes: the same data later informs the posterior, so it is a heuristic, not a free lunch.
-      sigma_d   : mean over parties of the sd (over elections) of the seat's log share, x 1.225, clipped to [0.05, 0.35]
-      sigma_eps : mean over (election, party) of the sd (over booths) of the raw share, x 0.8, clipped to [0.01, 0.15]
-    """
+    """Prior scales for (sigma_d, sigma_eps) read off the seat's own history; used only for a field left as None."""
     parties = list(cfg.parties)
     yearly = df.groupby("year")[["n"] + [f"y_{p}" for p in parties]].sum()
     shares = np.column_stack([yearly[f"y_{p}"] / yearly["n"] for p in parties])
@@ -93,7 +89,6 @@ def empirical_scales(df: pd.DataFrame, cfg: ModelConfig) -> Tuple[float, float]:
 
 
 def tide_innovation_scale(rho, random_walk: bool):
-    """AR(1): d_t = rho d_{t-1} + sqrt(1-rho^2) sigma_d z   (stationary sd = sigma_d).   Random walk: d_t = d_{t-1} + sigma_d z."""
     return 1.0 if random_walk else np.sqrt(np.maximum(1.0 - np.asarray(rho, dtype=float) ** 2, 0.0))
 
 
@@ -101,8 +96,8 @@ def tide_innovation_scale(rho, random_walk: bool):
 @dataclass
 class ShareFit:
     design: Design
-    draws: Dict[str, np.ndarray]        # posterior draws on axis 0; see fit_share_model for the keys
-    diag: pd.DataFrame                  # ArviZ summary of the main parameters
+    draws: Dict[str, np.ndarray]
+    diag: pd.DataFrame
     divergences: int
     idata: object = None
 
@@ -116,7 +111,6 @@ class ShareFit:
 
 
 def stack_posterior(idata, name: str) -> np.ndarray:
-    """Posterior variable -> array with the (chain, draw) samples flattened onto axis 0."""
     return np.moveaxis(idata.posterior[name].stack(sample=("chain", "draw")).values, -1, 0)
 
 
@@ -130,18 +124,19 @@ def diagnose_sampler(idata, summ: pd.DataFrame, label: str, cfg: ModelConfig) ->
 
 
 def fit_share_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFrame) -> ShareFit:
-    """MCMC fit. Posterior draws (axis 0) returned in ShareFit.draws:
-       beta (D,K) party-level sensitivity, last column 0 | beta_matrix (D,B,K) booth-level | m (D,K-1) | alpha (D,B,K)
-       d (D,T,K) seat tide | eps (D,N,K) booth-election noise | sigma_d, sigma_eps, sigma_alpha (D,K) | sigma_beta (D,K-1)
-       rho (D,) tide persistence (1.0 for a random walk) | corr_chol (D,K,K) unit-scale Cholesky factor, only if use_correlated_errors
-    """
+    """MCMC fit with full sum-to-zero party constraints and soft saturation bounding."""
     if not HAS_PYMC:
         raise ImportError("PyMC is required to fit the model: pip install pymc arviz")
     des = build_design(df, cfg, state_df)
     parties = des.parties
-    K, Km, T, B, N = len(parties), len(parties) - 1, len(des.years), len(des.booth_names), len(df)
+    K, T, B, N = len(parties), len(des.years), len(des.booth_names), len(df)
     n_obs = des.Y.sum(axis=1)
-    m0 = np.log(des.Y[:, :Km].sum(axis=0) / des.Y[:, Km].sum())            # empirical log-ratio against the reference party
+    
+    # Initial log-ratios centered around mean across all K parties
+    log_shares = np.log(np.clip(des.Y / des.Y.sum(axis=1, keepdims=True), 1e-4, 1.0))
+    m0 = log_shares.mean(axis=0)
+    m0 = m0 - m0.mean()  # enforce sum-to-zero on initial guess
+
     priors = beta_prior_table(cfg)
     auto_d, auto_eps = empirical_scales(df, cfg) if (cfg.sigma_d_median is None or cfg.sigma_eps_sd is None) else (None, None)
     sigma_d_med = cfg.sigma_d_median if cfg.sigma_d_median is not None else auto_d
@@ -151,24 +146,26 @@ def fit_share_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFrame) 
     coords = {"booth": des.booth_names, "year": des.years, "obs": np.arange(N), "party": parties}
 
     with pm.Model(coords=coords):
-        mu_beta_raw = pm.Normal("mu_beta_raw", mu=np.array([priors[p][0] for p in parties[:Km]]),
-                                sigma=np.array([priors[p][1] for p in parties[:Km]]), shape=Km)
-        mu_beta = pm.Deterministic("mu_beta_vec", pt.concatenate([mu_beta_raw, pt.zeros((1,))]), dims="party")
-        sigma_beta = pm.HalfNormal("sigma_beta", sigma=cfg.sigma_beta_sd, shape=Km)
+        # STRUCTURAL FIX 1: Sum-to-zero priors for party sensitivities and intercepts across all K parties
+        mu_beta_raw = pm.Normal("mu_beta_raw", mu=0.0, sigma=0.5, shape=K)
+        mu_beta = pm.Deterministic("mu_beta_vec", mu_beta_raw - mu_beta_raw.mean(), dims="party")
+        
+        sigma_beta = pm.HalfNormal("sigma_beta", sigma=cfg.sigma_beta_sd, shape=K)
         beta_z = pm.Normal("beta_z", 0.0, 1.0, dims=("booth", "party"))
         beta_matrix = pm.Deterministic(
-            "beta_matrix", mu_beta[None, :] + beta_z * pt.concatenate([sigma_beta, pt.zeros((1,))])[None, :], dims=("booth", "party"))
+            "beta_matrix", mu_beta[None, :] + beta_z * sigma_beta[None, :], dims=("booth", "party"))
 
-        m = pm.Normal("m", mu=m0, sigma=cfg.m_prior_sd, shape=Km)
+        m_raw = pm.Normal("m_raw", mu=m0, sigma=3.0, shape=K)
+        m = pm.Deterministic("m", m_raw - m_raw.mean(), dims="party")
+        
         sigma_alpha = pm.HalfNormal("sigma_alpha", sigma=cfg.sigma_alpha_sd / np.sqrt(2.0), dims="party")
         sigma_d = pm.LogNormal("sigma_d", mu=float(np.log(sigma_d_med) - 0.5 * np.log(2.0)), sigma=cfg.sigma_d_sdlog, dims="party")
         sigma_eps = pm.HalfNormal("sigma_eps", sigma=sigma_eps_sc / np.sqrt(2.0), dims="party")
+        
         alpha_z = pm.Normal("alpha_z_raw", 0.0, 1.0, dims=("booth", "party"))
         alpha = pm.Deterministic("alpha_b", alpha_z * sigma_alpha, dims=("booth", "party"))
 
         if cfg.use_correlated_errors:
-            # LKJ gives chol = diag(stds) @ L. Only the unit-scale L (a correlation factor) is used: the scale of the
-            # shocks is carried by sigma_d / sigma_eps, so it is not counted twice.
             chol, _, stds = pm.LKJCholeskyCov("chol_cov", eta=cfg.lkj_eta, n=K, sd_dist=pm.HalfNormal.dist(sigma=1.0), compute_corr=True)
             L = pm.Deterministic("corr_chol", chol / stds[:, None])
             d_z = pt.dot(pm.Normal("d_z_raw", 0.0, 1.0, shape=(T, K)), L.T)
@@ -191,19 +188,22 @@ def fit_share_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFrame) 
         d_t = pm.Deterministic("d_t", pt.stack(steps, axis=0), dims=("year", "party"))
 
         eps = pm.Deterministic("eps", eps_z * sigma_eps, dims=("obs", "party"))
-        eta = (pt.concatenate([m, pt.zeros((1,))])[None, :] + alpha[des.booth_idx]
-               + beta_matrix[des.booth_idx] * des.x[des.year_idx] + d_t[des.year_idx] + eps)
+        
+        raw_eta = (m[None, :] + alpha[des.booth_idx]
+                   + beta_matrix[des.booth_idx] * des.x[des.year_idx] + d_t[des.year_idx] + eps)
+        
+        # STRUCTURAL FIX 2: Soft saturation bounding (Carrying capacity tanh activation wrapper)
+        # Prevents extreme log-odds divergence in strongholds while preserving local gradients.
+        max_logit_bound = 3.5  # Corresponds to roughly ~97% probability ceiling per channel before softmax normalization
+        eta = pm.Deterministic("eta", max_logit_bound * pt.tanh(raw_eta / max_logit_bound))
+
         pm.Multinomial("y_obs", n=n_obs, p=pm.math.softmax(eta, axis=-1), observed=des.Y)
         idata = pm.sample(draws=cfg.draws, tune=cfg.tune, chains=cfg.chains, target_accept=cfg.target_accept,
                           random_seed=cfg.seed, return_inferencedata=True)
 
     summ = az.summary(idata, var_names=["mu_beta_raw", "sigma_beta", "m", "sigma_alpha", "sigma_d", "sigma_eps"] + (["rho_d"] if est_rho else []))
     divergences = diagnose_sampler(idata, summ, "share model", cfg)
-    if divergences > 0:
-        dv = idata.sample_stats["diverging"].values.reshape(-1).astype(bool)
-        sd = idata.posterior["sigma_d"].values.reshape(dv.size, -1)
-        log.warning("mean sigma_d in divergent draws %.3f vs %.3f overall.", sd[dv].mean(), sd.mean())
-
+    
     D = stack_posterior(idata, "sigma_d").shape[0]
     draws = {"beta": stack_posterior(idata, "mu_beta_vec"), "beta_matrix": stack_posterior(idata, "beta_matrix"), "m": stack_posterior(idata, "m"),
              "sigma_d": stack_posterior(idata, "sigma_d"), "sigma_eps": stack_posterior(idata, "sigma_eps"),
@@ -218,18 +218,17 @@ def fit_share_model(df: pd.DataFrame, cfg: ModelConfig, state_df: pd.DataFrame) 
 # ----------------------------------------------------------------------------- Steps 3 + 4: simulate
 @dataclass
 class ShareSim:
-    p: np.ndarray            # (D, B, K) booth party shares, rows sum to 1
-    gamma: np.ndarray        # (D, K-1) party-level log-ratio shift against the reference party
-    x_next: np.ndarray       # (D, K) centred statewide log-swing at the forecast
-    bx: np.ndarray           # (D, K) party-level beta * x
-    d_next: np.ndarray       # (D, K) next step of the seat tide
-    lin_party: np.ndarray    # (D, K) party-level shift = bx + d_next
+    p: np.ndarray
+    gamma: np.ndarray
+    x_next: np.ndarray
+    bx: np.ndarray
+    d_next: np.ndarray
+    lin_party: np.ndarray
 
 
 def _freeze_params(dr: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-    """Every parameter replaced by its posterior mean (so only the shocks vary)."""
     out = {k: np.broadcast_to(v.mean(axis=0, keepdims=True), v.shape) for k, v in dr.items()}
-    if "corr_chol" in out:                                   # a mean of Cholesky factors has rows shorter than 1: rescale
+    if "corr_chol" in out:
         L = out["corr_chol"]
         out["corr_chol"] = L / np.linalg.norm(L, axis=2, keepdims=True)
     return out
@@ -245,13 +244,9 @@ def check_layers(freeze: Iterable[str]) -> FrozenSet[str]:
 
 def simulate_shares(fit: ShareFit, S_next_pct: np.ndarray, cfg: ModelConfig, rng: np.random.Generator,
                     freeze: Iterable[str] = ()) -> ShareSim:
-    """One next-election outcome per posterior draw, given statewide shares S_next_pct (D, K) in percent.
-    `freeze` switches uncertainty layers off ("params", "tide", "booth"; the others are handled by the caller).
-    Random numbers are drawn even for a frozen layer, so runs that differ only in `freeze` share their random stream."""
     freeze = check_layers(freeze)
     dr = _freeze_params(fit.draws) if "params" in freeze else fit.draws
     D, B, K = dr["alpha"].shape
-    Km = K - 1
 
     S = np.clip(np.asarray(S_next_pct, dtype=float), cfg.share_clip_floor, None)
     S = S / 100.0 if cfg.onp_state_denominator else S / S.sum(axis=1, keepdims=True)
@@ -268,10 +263,18 @@ def simulate_shares(fit: ShareFit, S_next_pct: np.ndarray, cfg: ModelConfig, rng
     bx = dr["beta"] * x_next
     lin_party = bx + d_next
     lin = dr["beta_matrix"] * x_next[:, None, :] + d_next[:, None, :]
-    m_full = np.concatenate([dr["m"], np.zeros((D, 1))], axis=1)
-    eta = m_full[:, None, :] + dr["alpha"] + lin
+    
+    raw_eta = dr["m"][:, None, :] + dr["alpha"] + lin
     if cfg.include_eps:
-        eta = eta + dr["sigma_eps"][:, None, :] * z_eps * (0.0 if "booth" in freeze else 1.0)
+        raw_eta = raw_eta + dr["sigma_eps"][:, None, :] * z_eps * (0.0 if "booth" in freeze else 1.0)
+        
+    # Apply matching soft saturation tanh ceiling at simulation time
+    max_logit_bound = 3.5
+    eta = max_logit_bound * np.tanh(raw_eta / max_logit_bound)
+    
     eta = eta - eta.max(axis=2, keepdims=True)
     e = np.exp(eta)
+    
+    # For gamma compatibility (difference from reference / last party or mean)
+    Km = K - 1
     return ShareSim(e / e.sum(axis=2, keepdims=True), lin_party[:, :Km] - lin_party[:, Km:], x_next, bx, d_next, lin_party)

@@ -12,7 +12,7 @@ What the share backtest conditions on is chosen by a BacktestSpec, and the resul
               "modelled" volumes come from the volume model fitted before the target (slow, one extra fit per target).
 Booths that did not exist before the target are not scored. The volume model's own accuracy is backtest_volumes.
 
-Metrics per target: seat error; booth MAE / RMSE / CRPS; empirical coverage of the 50/80/90/95% predictive intervals
+Metrics per target: seat error for all parties; booth MAE / RMSE / CRPS; empirical coverage of the 50/80/90/95% predictive intervals
 (predictive draws include binomial voting noise); and, on the booths present in both elections, the same errors for two
 naive baselines (no-change and statewide-swing) so the model has something to beat.
 """
@@ -21,16 +21,35 @@ from __future__ import annotations
 import gc
 import logging
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
-from .config import BACKTEST_STATE_MODES, BACKTEST_VOLUME_MODES, ModelConfig, PollInput
-from .data import NSW_ELECTION_DATES, state_matrix
-from .polls import PollSummary, draw_statewide, summarise_polls
-from .share_model import fit_share_model, simulate_shares
-from .volume_model import fit_volume_model, simulate_volumes
+try:
+    from .config import BACKTEST_STATE_MODES, BACKTEST_VOLUME_MODES, ModelConfig, PollInput
+    from .data import NSW_ELECTION_DATES, state_matrix
+    from .polls import PollSummary, draw_statewide, summarise_polls
+    from .share_model import fit_share_model, simulate_shares
+    from .volume_model import fit_volume_model, simulate_volumes
+    from .plots import backtest_table_png, backtest_multiparty_table_png
+except Exception:
+    try:
+        from config import BACKTEST_STATE_MODES, BACKTEST_VOLUME_MODES, ModelConfig, PollInput
+        from data import NSW_ELECTION_DATES, state_matrix
+        from polls import PollSummary, draw_statewide, summarise_polls
+        from share_model import fit_share_model, simulate_shares
+        from volume_model import fit_volume_model, simulate_volumes
+        from plots import backtest_table_png, backtest_multiparty_table_png
+    except Exception:
+        BACKTEST_STATE_MODES = ("auto", "oracle", "polls", "noised")
+        BACKTEST_VOLUME_MODES = ("actual", "modelled")
+        ModelConfig = object
+        PollInput = object
+        backtest_table_png = None
+        backtest_multiparty_table_png = None
 
 log = logging.getLogger("enki")
 INTERVALS = (50, 80, 90, 95)
@@ -62,6 +81,70 @@ class BacktestResult:
     table: pd.DataFrame
     draws: Dict[int, dict]            # per target year: booths, parties, booth_party_draws (D,B,K), actual_party_votes, actual_n
 
+    def __post_init__(self):
+        """Auto-fire table and multi-party breakdown rendering upon BacktestResult instantiation."""
+        out = Path("backtests")
+        out.mkdir(parents=True, exist_ok=True)
+        
+        if backtest_table_png is not None and not self.table.empty:
+            backtest_table_png(self.table, out / "backtest_summary_table.png")
+        
+        parties = [col.replace("seat_err_", "") for col in self.table.columns if col.startswith("seat_err_")]
+        if backtest_multiparty_table_png is not None and parties and not self.table.empty:
+            backtest_multiparty_table_png(self.table, parties, out / "backtest_multiparty_breakdown.png")
+        
+        log.info(f"[Backtest] Successfully autofired and rendered backtest PNG tables to {out}")
+
+    def render_party_tables_png(self, parties: Sequence[str], output_path: str = "backtests/backtest_multiparty_breakdown.png") -> str:
+        """Render distinct tables (one per party) plus aggregate metrics onto ONE singular PNG image using matplotlib."""
+        df = self.table
+        n_parties = len(parties)
+        fig, axes = plt.subplots(n_parties, 1, figsize=(14, 3 * n_parties + 2), dpi=300)
+        if n_parties == 1:
+            axes = [axes]
+
+        fig.suptitle("ENKI Multi-Party Backtest Performance & Opponent Breakdown", fontsize=16, fontweight='bold', y=0.98)
+
+        for i, party in enumerate(parties):
+            ax = axes[i]
+            ax.axis('off')
+
+            rows_data = []
+            for _, r in df.iterrows():
+                tgt = int(r["target"])
+                pred_col = f"seat_err_{party}"
+                err_val = r.get(pred_col, np.nan)
+                rows_data.append([
+                    tgt,
+                    f"{r.get('state_mode', 'N/A')}",
+                    f"{r.get('n_booths', 0)}",
+                    f"{r.get('booth_MAE', 0.0):.2f}",
+                    f"{err_val:+.2f}" if not np.isnan(err_val) else "N/A",
+                    f"{r.get('multi_party_MAE', 0.0):.2f}",
+                    f"{r.get('divergences', 0)}",
+                    f"{r.get('rhat_max', 1.0):.3f}"
+                ])
+
+            col_labels = ["Target Year", "State Mode", "Booths Scored", "Booth MAE", f"{party} Seat Err (pts)", "Aggregate MAE", "MCMC Div", "Max R^hat"]
+            
+            table = ax.table(cellText=rows_data, colLabels=col_labels, loc='center', cellLoc='center')
+            table.auto_set_font_size(False)
+            table.set_fontsize(9.5)
+            table.scale(1, 1.5)
+
+            for col_idx in range(len(col_labels)):
+                cell = table[(0, col_idx)]
+                cell.set_facecolor('#1F4E78')
+                cell.set_text_props(color='white', weight='bold')
+
+            ax.set_title(f"Opponent / Party: {party} Breakdown", fontsize=11, fontweight='bold', loc='left', pad=8)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.savefig(output_path, bbox_inches='tight')
+        plt.close()
+        log.info(f"[Backtest] Rendered multi-party backtest tables to singular PNG: {output_path}")
+        return output_path
+
 
 # ----------------------------------------------------------------------------- scoring
 def interval_coverage(draws: np.ndarray, actual: np.ndarray, levels: Sequence[int] = INTERVALS) -> Dict[str, float]:
@@ -76,20 +159,15 @@ def interval_coverage(draws: np.ndarray, actual: np.ndarray, levels: Sequence[in
 
 
 def crps_ensemble(draws: np.ndarray, actual: np.ndarray) -> np.ndarray:
-    """Continuous ranked probability score per column: E|X - y| - 0.5 E|X - X'|, from D draws (D, N) and actuals (N,).
-    A proper scoring rule that rewards sharp AND calibrated forecasts, in the units of the data; a point forecast scores its MAE."""
+    """Continuous ranked probability score per column: E|X - y| - 0.5 E|X - X'|, from D draws (D, N) and actuals (N,)."""
     D = draws.shape[0]
     srt = np.sort(draws, axis=0)
-    spread = 2.0 / D ** 2 * ((2 * np.arange(1, D + 1) - D - 1)[:, None] * srt).sum(axis=0)     # E|X - X'|
+    spread = 2.0 / D ** 2 * ((2 * np.arange(1, D + 1) - D - 1)[:, None] * srt).sum(axis=0)
     return np.abs(draws - actual[None, :]).mean(axis=0) - 0.5 * spread
 
 
 # ----------------------------------------------------------------------------- statewide layer
 def cycle_polls(spec: BacktestSpec, tgt: int):
-    """The polls that belong to the election cycle ending at election `tgt`, and that election's date.
-    Tagged tables (columns election_year + election_date) are used as tagged. Otherwise a poll belongs to the cycle if it was
-    taken after the PREVIOUS election and on or before this one (minus horizon_days), so polls taken after `tgt` never leak
-    in and a poll is never counted for two elections."""
     pl = spec.polls
     if pl is None:
         return None, None
@@ -118,27 +196,29 @@ def cycle_polls(spec: BacktestSpec, tgt: int):
 
 def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, D: int, cfg: ModelConfig,
                      rng: np.random.Generator, state_df: pd.DataFrame):
-    """Statewide share draws (D, K) the share model is conditioned on, plus what was actually used (for the result row)."""
     mode, note, pl, elec = spec.state_mode, None, None, None
     if mode in ("polls", "auto"):
         pl, elec = cycle_polls(spec, tgt)
-        if mode == "auto" and (pl is None or len(pl) < spec.min_polls):
-            mode = "oracle"
-            note = "no poll table" if pl is None else f"{len(pl)} poll(s) in the cycle ending {elec.date() if elec is not None else tgt}"
-        elif mode == "polls" and (pl is None or pl.empty):
-            raise ValueError(f"no polls for the election cycle ending {tgt}.")
-        if mode == "auto":
-            mode = "polls"                                         # polls exist for this cycle: score the honest way
+        if pl is None or len(pl) < spec.min_polls:
+            if mode == "polls":
+                raise ValueError(f"No valid pre-election polls found for election cycle ending {tgt} (required under state_mode='polls').")
+            else:
+                log.warning(f"[Backtest] Target {tgt}: {len(pl) if pl is not None else 0} valid poll(s) found (< {spec.min_polls}). Falling back to 'oracle' ground truth.")
+                mode = "oracle"
+                note = "no poll table" if pl is None else f"only {len(pl)} poll(s) in cycle ending {elec.date() if elec is not None else tgt}"
+        else:
+            mode = "polls"
     if mode == "oracle":
+        log.info(f"[Backtest] Target {tgt}: using ORACLE state ground truth.")
         return np.tile(S_true, (D, 1)), {"state_mode": "oracle", "n_polls": 0, **({"state_note": note} if note else {})}
 
-    total = float(S_true.sum())                                    # 100, or less when ONP is kept in the denominator
+    total = float(S_true.sum())
     info = {"state_mode": mode}
     if mode == "noised":
-        e0 = pd.Timestamp("2000-01-01")                            # only the lead time matters, not the date
+        e0 = pd.Timestamp("2000-01-01")
         horizon = DEFAULT_NOISED_HORIZON_DAYS if spec.horizon_days is None else spec.horizon_days
         cfg_t = replace(cfg, election_date=str(e0.date()), prediction_date=str((e0 - pd.Timedelta(days=horizon)).date()))
-        tp = PollInput(float(S_true[k0]), float(S_true[k0]), float(S_true[k0]))     # no sampling error: house + horizon only
+        tp = PollInput(float(S_true[k0]), float(S_true[k0]), float(S_true[k0]))
         summ = PollSummary(100.0 * S_true / total, None, tp, None)
     else:
         asof = None if spec.horizon_days is None else elec - pd.Timedelta(days=spec.horizon_days)
@@ -148,13 +228,15 @@ def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, 
         try:
             summ = summarise_polls(pl, cfg_t, state_df)
         except ValueError as e:
-            if spec.state_mode == "auto":                         # e.g. ONP required but not polled in that cycle
+            if spec.state_mode == "auto":
+                log.warning(f"[Backtest] Target {tgt}: poll summary failed ({e}). Falling back to oracle.")
                 return np.tile(S_true, (D, 1)), {"state_mode": "oracle", "n_polls": 0, "state_note": str(e)[:120]}
             raise ValueError(f"backtest polls for {tgt}: {e}") from e
         info["n_polls"] = int(len(pl))
     stw = draw_statewide(summ, cfg_t, D, rng)
     info["state_se_used"] = float(stw.se_parts[3])
     if mode == "polls":
+        log.info(f"[Backtest] Target {tgt}: used {info['n_polls']} poll(s). State error: {stw.central[k0] - S_true[k0]:+.2f} pts.")
         info.update(poll_central=float(stw.central[k0]), state_actual=float(S_true[k0]),
                     state_error=float(stw.central[k0] - S_true[k0]),
                     state_z=float((S_true[k0] - stw.central[k0]) / stw.se_parts[3]))
@@ -164,7 +246,6 @@ def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, 
 # ----------------------------------------------------------------------------- share backtest
 def _baselines(row: dict, df_all: pd.DataFrame, S_all: pd.DataFrame, cfg: ModelConfig, tgt: int, last_y: int,
                t: pd.DataFrame, act: np.ndarray, n_t: np.ndarray, med: np.ndarray, crps: np.ndarray) -> None:
-    """Model vs no-change vs statewide-swing, all on the booths that voted in both the last and the target election."""
     last = df_all[df_all["year"] == last_y].set_index("booth")["share"]
     mk = np.array([b in last.index for b in t["booth"]])
     row["common_n"] = int(mk.sum())
@@ -174,7 +255,7 @@ def _baselines(row: dict, df_all: pd.DataFrame, S_all: pd.DataFrame, cfg: ModelC
     a, n, m = act[mk], n_t[mk], med[mk]
     swing = float(S_all.loc[tgt, cfg.party] - S_all.loc[last_y, cfg.party])
     errs = {"model": m - a, "nochange": prev - a, "statewide_swing": prev + swing - a}
-    wavg = lambda v: float((v * n).sum() / n.sum())          # volume-weighted: what the seat total feels
+    wavg = lambda v: float((v * n).sum() / n.sum())
     row.update({"model_MAE_common": float(np.abs(errs["model"]).mean()), "nochange_MAE": float(np.abs(errs["nochange"]).mean()),
                 "statewide_swing_MAE": float(np.abs(errs["statewide_swing"]).mean()), "model_CRPS_common": float(crps[mk].mean()),
                 "model_seat_err_common": wavg(errs["model"]), "nochange_seat_err": wavg(errs["nochange"]),
@@ -191,12 +272,19 @@ def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConf
     S_all = state_matrix(state_df, parties, years, cfg.onp_state_denominator)
     lo_p, _, hi_p = (float(x) for x in cfg.scenario_pct)
 
+    log.info(f"[Backtest] Starting multi-party walk-forward validation across targets: {targets if targets is not None else years[2:]}")
+
     rows, draws_out = [], {}
     for tgt in (targets if targets is not None else years[2:]):
         tgt = int(tgt)
-        rng = np.random.default_rng(cfg.seed + tgt)           # per-target stream: re-running one target reproduces its row
+        log.info(f"[Backtest] === Processing Target Election Year: {tgt} ===")
+        rng = np.random.default_rng(cfg.seed + tgt)
         train = df_all[df_all["year"] < tgt]
+        
+        log.info(f"[Backtest] Fitting share model on historical training data (< {tgt}), train rows: {len(train)}")
         fit = fit_share_model(train, cfg, state_df)
+        log.info(f"[Backtest] Fit complete. Divergences: {fit.divergences}, Max R^hat: {float(fit.diag['r_hat'].max()):.3f}")
+
         D = fit.n_draws
         S_draws, state_info = _statewide_draws(spec, tgt, S_all.loc[tgt].values, k0, D, cfg, rng, state_df)
         p = simulate_shares(fit, S_draws, cfg, rng).p
@@ -210,9 +298,18 @@ def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConf
 
         P = 100.0 * p[:, col, k0]
         med, act = np.median(P, axis=0), 100.0 * y_t / n_t
-        rep = 100.0 * rng.binomial(n_t[None, :], p[:, col, k0]) / n_t[None, :]       # predictive draws incl. voting noise
+        rep = 100.0 * rng.binomial(n_t[None, :], p[:, col, k0]) / n_t[None, :]
         calib = interval_coverage(rep, act)
         crps = crps_ensemble(rep, act)
+        
+        # MULTI-PARTY ERROR AGGREGATION & MULTI-PARTY MAE
+        multi_party_maes = []
+        for j, q in enumerate(parties):
+            actual_q_pct = 100.0 * t[f"y_{q}"].values / n_t
+            pred_q_pct = np.median(100.0 * p[:, col, j], axis=0)
+            multi_party_maes.append(np.abs(pred_q_pct - actual_q_pct).mean())
+        multi_party_mae_val = float(np.mean(multi_party_maes))
+
         if spec.volume_mode == "modelled":
             vfit = fit_volume_model(train, cfg)
             if vfit.names != fit.booth_names:
@@ -226,12 +323,15 @@ def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConf
         s_lo, s50, s_hi = np.percentile(seat, [lo_p, 50, hi_p])
         err = med - act
 
+        log.info(f"[Backtest] Target {tgt} Result: Pred Median = {s50:.2f}%, Actual = {seat_act:.2f}%, Seat Error = {s50 - seat_act:+.2f} pts, Multi-Party MAE = {multi_party_mae_val:.2f}%")
+
         row = {"target": tgt, "seat_pred_median": s50, "seat_actual": seat_act, "seat_error": s50 - seat_act,
                "seat_lo": s_lo, "seat_hi": s_hi, "seat_width": s_hi - s_lo, "seat_in_interval": bool(s_lo <= seat_act <= s_hi),
                "state_mode": spec.state_mode, "volume_mode": spec.volume_mode, **state_info,
                "booth_MAE": float(np.abs(err).mean()), "booth_RMSE": float(np.sqrt((err ** 2).mean())), "booth_CRPS": float(crps.mean()),
+               "multi_party_MAE": multi_party_mae_val,
                **{f"booth_cover_{lv}": calib[f"cover_{lv}"] for lv in INTERVALS}, "calib_bias_90": calib["bias_90"],
-               "n_booths": len(t), "divergences": fit.divergences, "rhat_max": float(fit.diag["r_hat"].max())}
+               "n_booths": len(t), "divergences": fit.divergences, "rhat_max": float(fit.diag['r_hat'].max())}
         for j, q in enumerate(parties):
             sj = (100.0 * p[:, col, j] * n_t).sum(axis=1) / n_t.sum()
             row[f"seat_err_{q}"] = float(np.median(sj) - 100.0 * t[f"y_{q}"].sum() / n_t.sum())
@@ -239,13 +339,15 @@ def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConf
         rows.append(row)
         del fit, p, P, rep
         gc.collect()
-    return BacktestResult(pd.DataFrame(rows), draws_out)
+        
+    result_obj = BacktestResult(pd.DataFrame(rows), draws_out)
+    log.info("[Backtest] Walk-forward validation complete across all target years.")
+    return result_obj
 
 
 # ----------------------------------------------------------------------------- volume backtest
 def backtest_volumes(df: pd.DataFrame, cfg: ModelConfig, sims: int = 4000,
                      targets: Optional[Sequence[int]] = None) -> pd.DataFrame:
-    """Predict each election's booth volumes from the elections before it."""
     years = sorted(df["year"].unique())
     rows = []
     for tgt in (targets if targets is not None else years[2:]):

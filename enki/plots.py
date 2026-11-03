@@ -173,3 +173,98 @@ def backtest_table_png(summary: pd.DataFrame, output_path, dpi: int = 300) -> No
     plt.suptitle("ENKI Backtest Error & Calibration Diagnostics", fontsize=14, fontweight="bold", y=0.92)
     plt.tight_layout()
     _finish(output_path, dpi)
+
+
+def backtest_multiparty_table_png(summary: pd.DataFrame, parties: Sequence[str], output_path, dpi: int = 300) -> None:
+    """Render distinct tables (one per party) plus aggregate metrics onto ONE singular PNG image using matplotlib."""
+    if summary is None or summary.empty:
+        return
+    n_parties = len(parties)
+    fig, axes = plt.subplots(n_parties, 1, figsize=(14, 3 * n_parties + 2), dpi=dpi)
+    if n_parties == 1:
+        axes = [axes]
+
+    fig.suptitle("ENKI Multi-Party Backtest Performance & Opponent Breakdown", fontsize=16, fontweight='bold', y=0.98)
+
+    for i, party in enumerate(parties):
+        ax = axes[i]
+        ax.axis('off')
+
+        rows_data = []
+        for _, r in summary.iterrows():
+            tgt = int(r["target"])
+            pred_col = f"seat_err_{party}"
+            err_val = r.get(pred_col, np.nan)
+            rows_data.append([
+                tgt,
+                f"{r.get('state_mode', 'N/A')}",
+                f"{r.get('n_booths', 0)}",
+                f"{r.get('booth_MAE', 0.0):.2f}",
+                f"{err_val:+.2f}" if not np.isnan(err_val) else "N/A",
+                f"{r.get('multi_party_MAE', 0.0):.2f}",
+                f"{r.get('divergences', 0)}",
+                f"{r.get('rhat_max', 1.0):.3f}"
+            ])
+
+        col_labels = ["Target Year", "State Mode", "Booths Scored", "Booth MAE", f"{party} Seat Err (pts)", "Aggregate MAE", "MCMC Div", "Max R^hat"]
+        
+        table = ax.table(cellText=rows_data, colLabels=col_labels, loc='center', cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(9.5)
+        table.scale(1, 1.5)
+
+        for col_idx in range(len(col_labels)):
+            cell = table[(0, col_idx)]
+            cell.set_facecolor('#1F4E78')
+            cell.set_text_props(color='white', weight='bold')
+
+        ax.set_title(f"Opponent / Party: {party} Breakdown", fontsize=11, fontweight='bold', loc='left', pad=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    _finish(output_path, dpi)
+
+
+def backtest_distribution_validation_plot(draws_dict: dict, target_party: str, output_path, dpi: int = 300) -> None:
+    """Backtest validation density plot with actual election outcome vertical dashed lines."""
+    booths = draws_dict["booths"]
+    parties = list(draws_dict["parties"])
+    draws = draws_dict["booth_party_draws"] # shape (D, B, K)
+    actual_votes = draws_dict["actual_party_votes"] # shape (B, K)
+    actual_n = draws_dict["actual_n"] # shape (B,)
+    
+    total_vol = actual_n.sum()
+    seat_draws = pd.DataFrame(index=range(draws.shape[0]))
+    seat_actuals = {}
+    
+    for k_idx, party in enumerate(parties):
+        seat_draws[party] = (draws[:, :, k_idx] * actual_n[None, :]).sum(axis=1) / total_vol
+        seat_actuals[party] = float((actual_votes[:, k_idx].sum() / total_vol) * 100.0)
+
+    sns.set_theme(style="white")
+    fig, ax = plt.subplots(figsize=(11, 6))
+    
+    for col in seat_draws.columns:
+        is_target = col.upper() == target_party.upper()
+        color = PARTY_COLORS.get(col.upper(), "#333333")
+        sns.kdeplot(data=seat_draws[col].dropna(), label=col, color=color,
+                    linewidth=2.8 if is_target else 1.8, ax=ax, fill=True, alpha=0.18 if is_target else 0.05)
+        
+        actual_val = seat_actuals.get(col, 0.0)
+        top = ax.get_ylim()[1]
+        ax.vlines(actual_val, 0, top * 0.85, colors=color, linestyles="dashed", linewidth=2)
+        ax.text(actual_val, top * 0.88, f"{col} Actual\n{actual_val:.1f}%", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color=color)
+
+    ax.set_title(f"ENKI Backtest Validation Outcome Distributions", fontsize=15, fontweight="bold", pad=25)
+    ax.set_xlabel("Projected vs Actual Primary Vote Share (%)", fontsize=12, fontweight="bold", labelpad=10)
+    ax.set_ylabel("Probability Density", fontsize=12, fontweight="bold", labelpad=10)
+    ax.set_xlim(0, 70)
+    ticks = [t for t in ax.get_xticks() if 0 <= t <= 100]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([f"{t:.0f}%" for t in ticks])
+    ax.yaxis.set_major_formatter("{x:.2f}")
+    ax.legend(title="Party", frameon=True, facecolor="white", edgecolor="none", loc="upper right")
+    sns.despine(top=True, right=True)
+    ax.spines["left"].set_linewidth(2)
+    ax.spines["bottom"].set_linewidth(2)
+    plt.tight_layout()
+    _finish(output_path, dpi)
