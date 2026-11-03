@@ -2,6 +2,8 @@
 
 This readme is a wip and is definitely not up to convention on how to write a readme, but you'll have to suck it up and just read whats going on.
 
+#### NOTE THIS README DOESN'T HAVE DOCUMENTATION ON OPV YET, BUT ITS PRESENT.
+
 ## Project Metadata
 
 #### **Project Name:**
@@ -10,7 +12,7 @@ ENKI Election Engine
 
 #### **Version:**
 
-V3.3 (Package refactor: the model is now the `enki/` package)
+V3.4
 
 #### **Author:**
 
@@ -21,22 +23,6 @@ Alec, aka [raeganraegan](https://github.com/raeganraegan) on github.
 It aims to predict the primary vote of an electorate seat by booth and aggregate that into boothwide data predicted for the seat. From this, the aim is to then simulate the OPV preference flows present within the NSW state election.
 
 Note, this has been tuned/calibrated to the upcoming [NSW state election](https://elections.nsw.gov.au/elections/state-elections/2027-nsw-state-election). I'm sure it can be tuned to other elections but that's for another version to implement. Aim is to get this version working before this election and to get actionable booth level data from the twofold prediction of this engine. A bold aim indeed.
-
-#### **How this works:**
-
-This is divided into two parts.
-
-* [x] Part 1: [ENKI](/enki/) Predicts the primary vote of an election based on historical data
-
-* [ ] Part 2: [INANNA](/INANNA_V2.py) Uses above data and applies OPV preferences to them.
-
-So the overall flow is
-
-$$
-\text{In} \rightarrow \text{ENKI}(\text{In}) \rightarrow \text{Out}_1 \rightarrow \text{INANNA}(\text{Out}_1) \rightarrow \text{Out}_2
-$$
-
-The reason this is split is so that I can program the primary vote calculation distinctly from the OPV flow preference vote. It also eventually if I want to, allows me to substitute INANNA for a different voting system.
 
 #### **Files:**
 
@@ -92,6 +78,15 @@ And a few excel sheets, and `npz` that are characteristic of the simulation as w
 As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident.
 
 Each run also saves `inputs_resolved.json` (every setting actually used) and, with `record_trace` on, a `trace.npz` holding the signal at each step above.
+
+# Cool New Plots (OPV!)
+
+Hi I forgot to add opv to this readme but it generates cool images!
+
+![image4](/Showcase/opv1.png)
+![image4](/Showcase/opv2.png)
+![image4](/Showcase/opv3.png)
+![image4](/Showcase/opv4.png)
 
 # Election Engine (`enki/`) Model Specifications
 
@@ -413,30 +408,6 @@ $$
 s_k = \frac{\sum_b V_b \, p'_{kb}}{\sum_b V_b}
 $$
 
-## Backtest
-
-`backtest_shares` refits on the elections before each target and predicts it. What it is *given* about the target's statewide result is chosen per election:
-
-| `backtest_state_mode` | Meaning |
-| ----- | ----- |
-| `"auto"` (default) | **Per election**: if polls exist for that election's cycle they are used, exactly as in a live forecast; otherwise the true statewide result is used and the row says so (`state_mode`, `state_note`). |
-| `"polls"` | Strict: polls are required for every backtested election (error if a cycle has none). |
-| `"oracle"` | Always the **true** statewide result. Poll error is never tested. |
-| `"noised"` | The true result plus the *assumed* error budget (`poll_house_sd`, `time_horizon_gamma`). Cannot check that budget. |
-
-**One master poll file.** The backtest reads the same `polls` table as the live forecast (or a separate `backtest_polls` if you give one). No tagging is needed. A poll belongs to the cycle ending at election *T* if it was taken **after the previous election and on or before *T*** (minus `backtest_poll_horizon_days`, if set). So a poll is never counted for two elections, and a poll taken after *T* never leaks into *T*. A cycle with fewer than `backtest_min_polls` (default 1) polls falls back to the true result. Required columns are the same as for the live forecast: `date` and one column per modelled party (plus `ONP` if `onp_mode="entry"` or `onp_state_denominator` is on; a cycle lacking it falls back and says why). `sample_size` is optional and may be blank. Values may be fractions or percentages.
-
-Election dates come from the built-in NSW list (1988 to 2023). Add or override with `election_dates={2027: "2027-03-27", ...}`. A tagged table (columns `election_year` and `election_date`) is also accepted and used as tagged.
-
-| Other setting | Meaning |
-| ----- | ----- |
-| `backtest_volume_mode` | `"actual"` (default): true booth volumes weight the seat total. `"modelled"`: volumes from the volume model fitted before the target (one extra fit per election, slow). |
-| `backtest_poll_horizon_days` | `"polls"`/`"auto"`: ignore polls within this many days of the election (score a forecast made, say, 180 days out). `"noised"`: the assumed lead time (default 180). |
-| `backtest_min_polls` | `"auto"`: minimum polls in a cycle before they are used. |
-
-Reported per target: seat error and the width of the 90% band (`seat_width`); booth MAE, RMSE and CRPS; empirical coverage of the 50/80/90/95% predictive intervals (draws include binomial voting noise); and, on booths present in both elections, the model beside a no-change and a statewide-swing baseline. Where polls were used: the poll's error on the target party (`state_error`), `n_polls`, and `state_z`, how many assumed standard errors the true result was from the poll average. If `state_z` is routinely beyond about 1, `poll_house_sd` and `time_horizon_gamma` are too small. ENKI warns, listing which elections fell back to the true result. Each target has its own random stream (`seed + year`). One Nation is not applied in the backtest. Booths that did not exist before the target are not scored.
-
-**Polls are only useful here if they predate an election you backtest.** A file whose earliest poll is after the 2023 election (as in a file starting May 2023) contributes nothing to any backtest; it belongs entirely to the live forecast. To backtest with polls, add polls from the cycles before 2023, 2019 and so on, to the same file.
 
 ## Known Limitations
 
@@ -457,25 +428,3 @@ Things the model does not do, or does only weakly. None are bugs; they bound wha
 * **The reference party matters.** Setting $\beta_K = 0$ for `OTHER` makes the model depend on which party is last in `parties`.
 
 * **Endogenous Volume-Share Linkage.** Volume $\boldsymbol{V}$ and share $\boldsymbol{p}_b$ are sampled independently, ignoring potential joint effects where polarization simultaneously alters turnout and vote choice.
-
-# V3 Planned Changes
-
-I'm currently working on the following (ticked off if completed):
-
-* [x] **Split ENKI into a package** (`enki/`): one module per step, dependencies point one way, no circular imports.
-
-* [x] **Move Backtests out of ENKI** (`enki/backtest.py`; no circular imports).
-
-* [x] **Implement Hierarchical Booth Random Slopes** ($\beta_{kb}$).
-
-* [x] **Implement Secular Random Walk Dynamics & Correlated Party Shocks (Phase 1 Update)**.
-
-* [ ] **Process Flow Diagram for ENKI**: PDF log generation with invariants checks (the step registry and trace in `enki/pipeline.py` are already in place for it).
-
-* [ ] **Laplace Process Sensitivity Analysis**: Experimental transfer function sensitivity checks under ONP steps/ramps.
-
-Once that's done, it's a matter of doubling down into INANNA and making that ironclad.
-
-# Why so little information on INANNA?
-
-Cos i will get to that in time, rn i need to establish that ENKI is working fine. I partitioned the program like this so I can work on it in distinct parts.
