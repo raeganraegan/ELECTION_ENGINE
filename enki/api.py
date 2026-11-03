@@ -27,7 +27,7 @@ from .pipeline import check_trace
 from .report import print_run_report
 
 log = logging.getLogger("enki")
-_DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year", "backtest_polls")
+_DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year", "backtest_polls", "election_dates")
 _TUPLE_FIELDS = ("parties", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
 
 
@@ -131,12 +131,17 @@ def resolve(x) -> Resolved:
         if cfg.registered_electors is not None:
             warnings_.append("projected_formal_votes AND registered_electors are both set: projected_formal_votes wins.")
     data["target_year"] = flat.get("target_year")
-    if flat.get("backtest_polls") is not None:
-        data["backtest_polls"] = read_frame(flat["backtest_polls"], "backtest_polls")
-        src["backtest_polls"] = _source(flat["backtest_polls"])
-    elif run.run_backtest and run.backtest_state_mode == "polls":
-        raise KeyError("ENKI(x): backtest_state_mode='polls' needs 'backtest_polls' (historical polls with election_year, "
-                       "election_date and date columns).")
+    if run.run_backtest and run.backtest_state_mode in ("auto", "polls"):
+        # The backtest reads the same master poll table as the live forecast unless a separate backtest_polls table is given.
+        live = flat.get("polls")
+        if flat.get("backtest_polls") is not None:
+            data["backtest_polls"], src["backtest_polls"] = read_frame(flat["backtest_polls"], "backtest_polls"), _source(flat["backtest_polls"])
+        elif live is not None and not isinstance(live, (PollInput, dict)):
+            data["backtest_polls"], src["backtest_polls"] = data.get("polls", read_frame(live, "polls")), "<same table as polls>"
+        elif run.backtest_state_mode == "polls":
+            raise KeyError("ENKI(x): backtest_state_mode='polls' needs a poll TABLE ('polls' or 'backtest_polls'), not a single poll number.")
+    if flat.get("election_dates") is not None:
+        data["election_dates"] = dict(flat["election_dates"])
     if run.run_backtest and run.backtest_state_mode == "oracle":
         warnings_.append("Backtest is conditional on the TRUE statewide result and says nothing about poll error. Use "
                          "backtest_state_mode='polls' (with backtest_polls) or 'noised' for an end-to-end test.")
@@ -218,9 +223,14 @@ def ENKI(x) -> ENKIOutput:
 
     if run.run_backtest:
         log.info("RUNNING HISTORICAL BACKTEST")
-        spec = BacktestSpec(run.backtest_state_mode, run.backtest_volume_mode, data.get("backtest_polls"), run.backtest_poll_horizon_days)
+        spec = BacktestSpec(run.backtest_state_mode, run.backtest_volume_mode, data.get("backtest_polls"), run.backtest_poll_horizon_days,
+                            data.get("election_dates"), run.backtest_min_polls)
         bt = backtest_shares(df, state_df, cfg, run.backtest_targets, return_draws=True, spec=spec)
         y.backtest, y.backtest_draws = bt.table, bt.draws
+        fell = bt.table.loc[bt.table["state_mode"] == "oracle", "target"].tolist() if run.backtest_state_mode == "auto" else []
+        if fell:
+            y.warnings.append(f"Backtest used the TRUE statewide result (no poll error tested) for {fell}: no polls fall in those election "
+                              f"cycles. Elections backtested with polls: {sorted(set(bt.table['target']) - set(fell))}.")
     if run.run_volume_backtest:
         y.volume_backtest = backtest_volumes(df, cfg, run.backtest_volume_sims, run.backtest_targets)
     if out is not None:

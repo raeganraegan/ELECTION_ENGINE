@@ -9,8 +9,8 @@
 !sample_booth_results.csv
 !sample_polls.csv
 !share_models.py
-!ENKI_V3.py
 !share_model.py
+!/backtest.py
 !/enki
 !/enki/*
 !/tests

@@ -417,20 +417,28 @@ $$
 
 ## Backtest
 
-`backtest_shares` refits on the elections before each target and predicts it. What it is *given* about the target is a choice, and the result table records it (`state_mode`, `volume_mode`):
+`backtest_shares` refits on the elections before each target and predicts it. What it is *given* about the target's statewide result is chosen per election:
 
-| Setting | Value | Meaning |
-| ----- | ----- | ----- |
-| `backtest_state_mode` | `"oracle"` (default) | The **true** statewide result is used, so poll error is never tested. This only tests the seat-local model. ENKI warns when you use it. |
-| | `"polls"` | Historical polls for each past election go through the same poll stage as a live forecast. This is the honest end-to-end test, and it measures the real poll error (`state_error`, `state_z`). Needs `backtest_polls`. |
-| | `"noised"` | The true result plus the *assumed* error budget (`poll_house_sd`, `time_horizon_gamma`). Needs no historical polls, but it assumes the budget is right, so it cannot check it. |
-| `backtest_volume_mode` | `"actual"` (default) | True booth volumes weight the seat total, so turnout error is never tested. |
-| | `"modelled"` | Volumes come from the volume model fitted before the target (one extra fit per election, slow). |
-| `backtest_poll_horizon_days` | number or `None` | `"polls"`: ignore polls within this many days of the election (so you score a forecast made, say, 180 days out). `"noised"`: the assumed lead time (default 180). |
+| `backtest_state_mode` | Meaning |
+| ----- | ----- |
+| `"auto"` (default) | **Per election**: if polls exist for that election's cycle they are used, exactly as in a live forecast; otherwise the true statewide result is used and the row says so (`state_mode`, `state_note`). |
+| `"polls"` | Strict: polls are required for every backtested election (error if a cycle has none). |
+| `"oracle"` | Always the **true** statewide result. Poll error is never tested. |
+| `"noised"` | The true result plus the *assumed* error budget (`poll_house_sd`, `time_horizon_gamma`). Cannot check that budget. |
 
-`backtest_polls` is a table with one row per poll: `election_year`, `election_date` (one per year), `date`, a column for each modelled party, and optionally `ONP` and `sample_size`. It needs the same ONP column as a live forecast if `onp_mode="entry"` or `onp_state_denominator` is on.
+**One master poll file.** The backtest reads the same `polls` table as the live forecast (or a separate `backtest_polls` if you give one). No tagging is needed. A poll belongs to the cycle ending at election *T* if it was taken **after the previous election and on or before *T*** (minus `backtest_poll_horizon_days`, if set). So a poll is never counted for two elections, and a poll taken after *T* never leaks into *T*. A cycle with fewer than `backtest_min_polls` (default 1) polls falls back to the true result. Required columns are the same as for the live forecast: `date` and one column per modelled party (plus `ONP` if `onp_mode="entry"` or `onp_state_denominator` is on; a cycle lacking it falls back and says why). `sample_size` is optional and may be blank. Values may be fractions or percentages.
 
-Reported per target: seat error and the width of the 90% band (`seat_width`); booth MAE, RMSE and CRPS; empirical coverage of the 50/80/90/95% predictive intervals (draws include binomial voting noise); and, on booths present in both elections, the model beside a no-change and a statewide-swing baseline. In `"polls"` mode also the poll's error on the target party and `state_z`, how many of the assumed standard errors the actual result was away. If `state_z` is routinely beyond about 1, `poll_house_sd` and `time_horizon_gamma` are too small. Each target has its own random stream (`seed + year`), so rerunning one target reproduces its row. One Nation is not applied in the backtest. Booths that did not exist before the target are not scored.
+Election dates come from the built-in NSW list (1988 to 2023). Add or override with `election_dates={2027: "2027-03-27", ...}`. A tagged table (columns `election_year` and `election_date`) is also accepted and used as tagged.
+
+| Other setting | Meaning |
+| ----- | ----- |
+| `backtest_volume_mode` | `"actual"` (default): true booth volumes weight the seat total. `"modelled"`: volumes from the volume model fitted before the target (one extra fit per election, slow). |
+| `backtest_poll_horizon_days` | `"polls"`/`"auto"`: ignore polls within this many days of the election (score a forecast made, say, 180 days out). `"noised"`: the assumed lead time (default 180). |
+| `backtest_min_polls` | `"auto"`: minimum polls in a cycle before they are used. |
+
+Reported per target: seat error and the width of the 90% band (`seat_width`); booth MAE, RMSE and CRPS; empirical coverage of the 50/80/90/95% predictive intervals (draws include binomial voting noise); and, on booths present in both elections, the model beside a no-change and a statewide-swing baseline. Where polls were used: the poll's error on the target party (`state_error`), `n_polls`, and `state_z`, how many assumed standard errors the true result was from the poll average. If `state_z` is routinely beyond about 1, `poll_house_sd` and `time_horizon_gamma` are too small. ENKI warns, listing which elections fell back to the true result. Each target has its own random stream (`seed + year`). One Nation is not applied in the backtest. Booths that did not exist before the target are not scored.
+
+**Polls are only useful here if they predate an election you backtest.** A file whose earliest poll is after the 2023 election (as in a file starting May 2023) contributes nothing to any backtest; it belongs entirely to the live forecast. To backtest with polls, add polls from the cycles before 2023, 2019 and so on, to the same file.
 
 ## Known Limitations
 
@@ -440,7 +448,7 @@ Things the model does not do, or does only weakly. None are bugs; they bound wha
 
 * **Spatial Autocorrelation (CAR/SAR) is omitted.** Booth-level noise ($\varepsilon$) is spatially independent; ignoring physical proximity/neighborhood demographic clustering means seat prediction bands can be slightly underdispersed.
 
-* **The default backtest is optimistic.** `backtest_state_mode="oracle"` and `backtest_volume_mode="actual"` give the model the true statewide result and true volumes. Use `"polls"` with historical polls (and `"modelled"` volumes) for an honest end-to-end score. The poll error budget (`poll_house_sd`, `time_horizon_gamma`) is set by hand; `state_z` in a `"polls"` backtest is the check on it.
+* **The backtest is only as honest as its inputs.** Elections with no polls in the master file fall back to the true statewide result (`"auto"`), and `backtest_volume_mode="actual"` uses true volumes. Add historical polls and use `"modelled"` volumes for an end-to-end score. The poll error budget (`poll_house_sd`, `time_horizon_gamma`) is set by hand; `state_z` in a `"polls"` backtest is the check on it.
 
 * **Few elections per seat.** A seat has only a handful of past elections, so a backtest has a handful of seat-level outcomes. Judge the model across many seats, not one.
 

@@ -17,7 +17,7 @@ SCENARIOS = ("worst", "average", "best")      # = scenario_pct percentiles (defa
 ONP_MODES = ("none", "brian", "entry")
 TIDE_PROCESSES = ("ar1", "random_walk")
 VOLUME_DRIFTS = ("last", "mean", "none")
-BACKTEST_STATE_MODES = ("oracle", "polls", "noised")      # see backtest.py
+BACKTEST_STATE_MODES = ("auto", "oracle", "polls", "noised")   # see backtest.py
 BACKTEST_VOLUME_MODES = ("actual", "modelled")
 
 # Prior (mean, sd) of the party-level sensitivity mu_beta to its own statewide log-share swing.
@@ -124,7 +124,8 @@ class RunOptions:
     run_forecast: bool = True
     run_backtest: bool = True                                  # refits once per past election: slow
     backtest_targets: Optional[Sequence[int]] = None           # None: every election with >= 2 earlier ones
-    backtest_state_mode: str = "oracle"                        # "oracle" | "polls" | "noised": what statewide input the backtest uses (backtest.py)
+    backtest_state_mode: str = "auto"                          # "auto" | "oracle" | "polls" | "noised": statewide input the backtest uses (backtest.py)
+    backtest_min_polls: int = 1                                # "auto": minimum polls in an election's cycle before they are used
     backtest_volume_mode: str = "actual"                       # "actual" | "modelled"
     backtest_poll_horizon_days: Optional[float] = None         # "polls": use only polls older than this before each election; "noised": lead time
     run_volume_backtest: bool = False
@@ -258,6 +259,8 @@ def validate(cfg: ModelConfig, run: RunOptions) -> List[str]:
         err.append(f"backtest_state_mode must be one of {BACKTEST_STATE_MODES}.")
     if run.backtest_volume_mode not in BACKTEST_VOLUME_MODES:
         err.append(f"backtest_volume_mode must be one of {BACKTEST_VOLUME_MODES}.")
+    if int(run.backtest_min_polls) < 1:
+        err.append("backtest_min_polls must be >= 1.")
     if run.backtest_poll_horizon_days is not None and float(run.backtest_poll_horizon_days) < 0:
         err.append("backtest_poll_horizon_days must be >= 0.")
     if run.output_root is None and run.make_plots:

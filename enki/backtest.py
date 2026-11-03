@@ -1,7 +1,8 @@
 """backtest.py -- walk-forward validation (both functions take the PREPARED booth table, data.prepare_booths). Refit on the elections BEFORE each target, then predict the target.
 
 What the share backtest conditions on is chosen by a BacktestSpec, and the result table records the choice:
-  state_mode  "oracle"  the TRUE statewide result of the target election replaces the poll layer: tests the seat-local
+  state_mode  "auto"    per election: "polls" if polls exist for its cycle, else "oracle" (recorded per row in state_mode);
+              "oracle"  the TRUE statewide result of the target election replaces the poll layer: tests the seat-local
                         model only, NOT poll error (the optimistic, original behaviour);
               "polls"   historical polls for each target election go through the same poll stage as a live forecast:
                         the honest test, and it measures the real poll error (state_error, state_z);
@@ -26,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BACKTEST_STATE_MODES, BACKTEST_VOLUME_MODES, ModelConfig, PollInput
-from .data import state_matrix
+from .data import NSW_ELECTION_DATES, state_matrix
 from .polls import PollSummary, draw_statewide, summarise_polls
 from .share_model import fit_share_model, simulate_shares
 from .volume_model import fit_volume_model, simulate_volumes
@@ -39,20 +40,21 @@ DEFAULT_NOISED_HORIZON_DAYS = 180.0
 
 @dataclass
 class BacktestSpec:
-    state_mode: str = "oracle"
+    state_mode: str = "auto"
     volume_mode: str = "actual"
-    polls: Optional[pd.DataFrame] = None            # state_mode="polls": columns election_year, election_date, date, <parties>[, ONP, sample_size]
-    horizon_days: Optional[float] = None            # "polls": ignore polls within this many days of the election; "noised": assumed lead time
+    polls: Optional[pd.DataFrame] = None            # the poll table (the same master file as the live forecast works)
+    horizon_days: Optional[float] = None            # "polls"/"auto": ignore polls within this many days of the election; "noised": lead time
+    election_dates: Optional[Dict[int, object]] = None    # year -> date; default NSW_ELECTION_DATES
+    min_polls: int = 1                              # "auto": fewer polls than this in a cycle -> fall back to the true result
 
     def __post_init__(self):
         if self.state_mode not in STATE_MODES:
             raise ValueError(f"state_mode must be one of {STATE_MODES}")
         if self.volume_mode not in VOLUME_MODES:
             raise ValueError(f"volume_mode must be one of {VOLUME_MODES}")
-        if self.state_mode == "polls":
-            need = {"election_year", "election_date", "date"}
-            if self.polls is None or need - set(self.polls.columns):
-                raise ValueError(f"state_mode='polls' needs backtest_polls with columns {sorted(need)} plus the party columns.")
+        if self.state_mode == "polls" and self.polls is None:
+            raise ValueError("state_mode='polls' needs a poll table (backtest_polls, or polls).")
+        self.election_dates = {int(y): pd.Timestamp(d) for y, d in (self.election_dates or NSW_ELECTION_DATES).items()}
 
 
 @dataclass
@@ -83,27 +85,62 @@ def crps_ensemble(draws: np.ndarray, actual: np.ndarray) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------- statewide layer
+def cycle_polls(spec: BacktestSpec, tgt: int):
+    """The polls that belong to the election cycle ending at election `tgt`, and that election's date.
+    Tagged tables (columns election_year + election_date) are used as tagged. Otherwise a poll belongs to the cycle if it was
+    taken after the PREVIOUS election and on or before this one (minus horizon_days), so polls taken after `tgt` never leak
+    in and a poll is never counted for two elections."""
+    pl = spec.polls
+    if pl is None:
+        return None, None
+    if {"election_year", "election_date"} <= set(pl.columns):
+        sub = pl[pl["election_year"] == tgt]
+        if sub.empty:
+            return sub, None
+        dates = pd.to_datetime(sub["election_date"]).unique()
+        if len(dates) != 1:
+            raise ValueError(f"the poll table must give ONE election_date per election_year (year {tgt} has {len(dates)}).")
+        elec = pd.Timestamp(dates[0])
+        start = pd.Timestamp.min
+    else:
+        if tgt not in spec.election_dates:
+            raise ValueError(f"no election date for {tgt}: add it to the election_dates input (known: {sorted(spec.election_dates)}).")
+        elec = spec.election_dates[tgt]
+        earlier = [d for y, d in spec.election_dates.items() if y < tgt]
+        start = max(earlier) if earlier else pd.Timestamp.min
+        when = pd.to_datetime(pl["date"])
+        end = elec - pd.Timedelta(days=spec.horizon_days) if spec.horizon_days is not None else elec
+        sub = pl[(when > start) & (when <= end)]
+    if spec.horizon_days is not None and "election_year" in pl.columns:
+        sub = sub[pd.to_datetime(sub["date"]) <= elec - pd.Timedelta(days=spec.horizon_days)]
+    return sub, elec
+
+
 def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, D: int, cfg: ModelConfig,
                      rng: np.random.Generator, state_df: pd.DataFrame):
-    """Statewide share draws (D, K) the share model is conditioned on, plus diagnostics for the result row."""
-    if spec.state_mode == "oracle":
-        return np.tile(S_true, (D, 1)), {}
+    """Statewide share draws (D, K) the share model is conditioned on, plus what was actually used (for the result row)."""
+    mode, note, pl, elec = spec.state_mode, None, None, None
+    if mode in ("polls", "auto"):
+        pl, elec = cycle_polls(spec, tgt)
+        if mode == "auto" and (pl is None or len(pl) < spec.min_polls):
+            mode = "oracle"
+            note = "no poll table" if pl is None else f"{len(pl)} poll(s) in the cycle ending {elec.date() if elec is not None else tgt}"
+        elif mode == "polls" and (pl is None or pl.empty):
+            raise ValueError(f"no polls for the election cycle ending {tgt}.")
+        if mode == "auto":
+            mode = "polls"                                         # polls exist for this cycle: score the honest way
+    if mode == "oracle":
+        return np.tile(S_true, (D, 1)), {"state_mode": "oracle", "n_polls": 0, **({"state_note": note} if note else {})}
+
     total = float(S_true.sum())                                    # 100, or less when ONP is kept in the denominator
-    info = {}
-    if spec.state_mode == "noised":
-        elec = pd.Timestamp("2000-01-01")                          # only the lead time matters, not the date
+    info = {"state_mode": mode}
+    if mode == "noised":
+        e0 = pd.Timestamp("2000-01-01")                            # only the lead time matters, not the date
         horizon = DEFAULT_NOISED_HORIZON_DAYS if spec.horizon_days is None else spec.horizon_days
-        cfg_t = replace(cfg, election_date=str(elec.date()), prediction_date=str((elec - pd.Timedelta(days=horizon)).date()))
+        cfg_t = replace(cfg, election_date=str(e0.date()), prediction_date=str((e0 - pd.Timedelta(days=horizon)).date()))
         tp = PollInput(float(S_true[k0]), float(S_true[k0]), float(S_true[k0]))     # no sampling error: house + horizon only
         summ = PollSummary(100.0 * S_true / total, None, tp, None)
     else:
-        pl = spec.polls[spec.polls["election_year"] == tgt]
-        if pl.empty:
-            raise ValueError(f"backtest_polls has no rows for election_year={tgt}.")
-        dates = pd.to_datetime(pl["election_date"]).unique()
-        if len(dates) != 1:
-            raise ValueError(f"backtest_polls must give ONE election_date per election_year (year {tgt} has {len(dates)}).")
-        elec = pd.Timestamp(dates[0])
         asof = None if spec.horizon_days is None else elec - pd.Timedelta(days=spec.horizon_days)
         pred = asof if asof is not None else pd.to_datetime(pl["date"]).max()
         cfg_t = replace(cfg, election_date=str(elec.date()), prediction_date=str(pred.date()),
@@ -111,10 +148,13 @@ def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, 
         try:
             summ = summarise_polls(pl, cfg_t, state_df)
         except ValueError as e:
+            if spec.state_mode == "auto":                         # e.g. ONP required but not polled in that cycle
+                return np.tile(S_true, (D, 1)), {"state_mode": "oracle", "n_polls": 0, "state_note": str(e)[:120]}
             raise ValueError(f"backtest polls for {tgt}: {e}") from e
+        info["n_polls"] = int(len(pl))
     stw = draw_statewide(summ, cfg_t, D, rng)
     info["state_se_used"] = float(stw.se_parts[3])
-    if spec.state_mode == "polls":
+    if mode == "polls":
         info.update(poll_central=float(stw.central[k0]), state_actual=float(S_true[k0]),
                     state_error=float(stw.central[k0] - S_true[k0]),
                     state_z=float((S_true[k0] - stw.central[k0]) / stw.se_parts[3]))

@@ -23,6 +23,11 @@ NSW_STATE_RESULTS = pd.DataFrame({
 })
 
 
+# NSW general election dates, used to decide which polls belong to which election cycle (override with the `election_dates` input).
+NSW_ELECTION_DATES = {1988: "1988-03-19", 1991: "1991-05-25", 1995: "1995-03-25", 1999: "1999-03-27", 2003: "2003-03-22",
+                      2007: "2007-03-24", 2011: "2011-03-26", 2015: "2015-03-28", 2019: "2019-03-23", 2023: "2023-03-25"}
+
+
 def read_frame(v, name: str) -> pd.DataFrame:
     """DataFrame | CSV path | list/dict of records -> DataFrame (always a copy)."""
     if isinstance(v, pd.DataFrame):

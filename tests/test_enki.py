@@ -23,7 +23,7 @@ from enki.pipeline import check_trace
 from enki.polls import _pct_scale, draw_statewide, summarise_polls
 from enki.share_model import check_layers, simulate_shares
 from enki.volume_model import projected_votes_from_electors, resolve_volumes
-from fake_fit import fake_fit_factory, fake_volume_fit, make_backtest_polls, make_booths, make_polls
+from fake_fit import fake_fit_factory, fake_volume_fit, make_backtest_polls, make_booths, make_master_polls, make_polls
 
 
 def patched(D=200):
@@ -344,14 +344,95 @@ class TestBacktestModes(Base):
         with a, b:
             y = enki.ENKI(base)
             self.assertTrue(any("TRUE statewide result" in w for w in y.warnings))
-            with self.assertRaises(KeyError):
+            with self.assertRaises(ValueError):                       # polls mode is strict: the 2026-only table has no polls for 2023
                 enki.ENKI({**base, "backtest_state_mode": "polls"})
+            with self.assertRaises(KeyError):                         # and a single poll NUMBER cannot be backtested at all
+                enki.ENKI({**base, "polls": {"central": 38, "low": 36, "high": 40}, "backtest_state_mode": "polls"})
             y2 = enki.ENKI({**base, "backtest_state_mode": "polls", "backtest_polls": make_backtest_polls(NSW_STATE_RESULTS, ModelConfig())})
             self.assertFalse(any("TRUE statewide result" in w for w in y2.warnings))
             self.assertIn("state_error", y2.backtest.columns)
         with self.assertRaises(ValueError):
             enki.resolve({"booth_results": self.booths, "polls": make_polls(), "backtest_state_mode": "nope"})
 
+
+class TestAutoPolls(Base):
+    def _run(self, polls, cfg=None, **spec_kw):
+        cfg = cfg or ModelConfig(prediction_date="2026-11-01")
+        df = prepare_booths(self.booths, cfg)
+        _, b = patched(300)
+        with b:
+            return backtest.backtest_shares(df, NSW_STATE_RESULTS, cfg, spec=BacktestSpec(polls=polls, **spec_kw)).table.set_index("target")
+
+    def test_default_is_auto(self):
+        self.assertEqual(RunOptions().backtest_state_mode, "auto")
+        self.assertEqual(BacktestSpec().state_mode, "auto")
+
+    def test_uses_polls_where_they_exist_and_the_true_result_where_not(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        t = self._run(make_master_polls(cfg, NSW_STATE_RESULTS), cfg)                    # polls for the 2019 and 2023 cycles only
+        self.assertEqual(t["state_mode"].to_dict(), {2015: "oracle", 2019: "polls", 2023: "polls"})
+        self.assertTrue(t.loc[[2019, 2023], "state_error"].between(0.3, 2.5).all())
+        self.assertTrue(np.isnan(t.loc[2015, "state_error"]))
+        self.assertEqual(t.loc[2015, "n_polls"], 0)
+
+    def test_no_leakage_between_cycles(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        t = self._run(make_master_polls(cfg, NSW_STATE_RESULTS), cfg)
+        self.assertEqual(t.loc[2019, "n_polls"], 3)          # not the 2023-cycle polls, not the post-2023 one
+        self.assertEqual(t.loc[2023, "n_polls"], 3)          # the 2023-05-01 poll (after the election) and the 2026 polls are excluded
+        self.assertNotEqual(t.loc[2023, "poll_central"], t.loc[2019, "poll_central"])
+        # a poll the day AFTER an election never counts for it
+        import pandas as pd
+        from enki.backtest import cycle_polls
+        pl = make_master_polls(cfg, NSW_STATE_RESULTS)
+        spec = BacktestSpec(polls=pl)
+        sub, elec = cycle_polls(spec, 2023)
+        self.assertTrue((pd.to_datetime(sub["date"]) <= elec).all())
+        self.assertTrue((pd.to_datetime(sub["date"]) > pd.Timestamp("2019-03-23")).all())
+
+    def test_a_file_with_only_post_2023_polls_never_applies(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        t = self._run(make_polls(onp=False), cfg)             # polls dated 2026 only
+        self.assertEqual(set(t["state_mode"]), {"oracle"})
+        self.assertEqual(set(t["n_polls"]), {0})
+
+    def test_min_polls_threshold_and_missing_requirement_fall_back(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        pl = make_master_polls(cfg, NSW_STATE_RESULTS)
+        self.assertEqual(set(self._run(pl, cfg, min_polls=4)["state_mode"]), {"oracle"})
+        # ONP required but never polled in those cycles -> auto falls back instead of crashing
+        cfg2 = ModelConfig(prediction_date="2026-11-01", onp_mode="entry")
+        t = self._run(pl, cfg2)
+        self.assertEqual(set(t["state_mode"]), {"oracle"})
+        self.assertIn("ONP", " ".join(t["state_note"].dropna()))
+
+    def test_polls_mode_is_strict_and_horizon_applies(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        pl = make_master_polls(cfg, NSW_STATE_RESULTS)
+        with self.assertRaises(ValueError) as e:
+            self._run(pl, cfg, state_mode="polls")            # no polls for 2015
+        self.assertIn("2015", str(e.exception))
+        late = self._run(pl, cfg, horizon_days=45.0)          # keeps only polls >= 45 days out (the 20-day-out ones drop)
+        self.assertEqual(late.loc[2019, "n_polls"], 2)
+
+    def test_election_dates_override_and_missing_date_is_an_error(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        pl = make_master_polls(cfg, NSW_STATE_RESULTS)
+        with self.assertRaises(ValueError) as e:
+            self._run(pl, cfg, election_dates={2019: "2019-03-23"})      # the 2015 and 2023 dates are unknown
+        self.assertIn("election_dates", str(e.exception))
+
+    def test_ENKI_uses_one_master_file_for_both_and_lists_the_fallbacks(self):
+        a, b = patched(100)
+        cfg = ModelConfig()
+        master = make_master_polls(cfg, NSW_STATE_RESULTS)
+        with a, b:
+            y = enki.ENKI({"booth_results": self.booths, "polls": master, "registered_electors": 60000, "prediction_date": "2026-11-01",
+                           "election_date": "2027-03-27", "print_report": False, "verbose": False})
+        self.assertEqual(y.backtest.set_index("target")["state_mode"].to_dict(), {2015: "oracle", 2019: "polls", 2023: "polls"})
+        self.assertTrue(any("[2015]" in w and "TRUE statewide result" in w for w in y.warnings))
+        self.assertEqual(y.data_sources["backtest_polls"], "<same table as polls>")
+        self.assertIsNotNone(y.forecast)
 
 class TestEndToEnd(Base):
     def test_ENKI_writes_everything(self):

@@ -79,3 +79,26 @@ def fake_volume_fit(df: pd.DataFrame, cfg: ModelConfig):
     diag = pd.DataFrame({"parameter": ["kappa"], "r_hat": [1.0], "ess_bulk": [1000.0]})
     return VolumeFit(names, years, btype, 0, totals, 0, diag,
                      {"a": 0.1 * rng.standard_normal((S, B)), "tau": np.zeros((S, T)), "kappa": np.full(S, 500.0)})
+
+
+def make_master_polls(cfg, state_df, cycles=(2019, 2023), alp_offset=1.5, live=True, shift_days=(120, 60, 20)) -> pd.DataFrame:
+    """One master poll table in the live format (date, firm, sample_size, parties): no election tags. Polls before the 2019 and 2023
+    elections, one poll just AFTER 2023, and (optionally) three live polls in 2026."""
+    from enki.data import NSW_ELECTION_DATES, state_matrix
+    S = state_matrix(state_df, cfg.parties, list(cycles))
+    rows = []
+    for y in cycles:
+        elec = pd.Timestamp(NSW_ELECTION_DATES[y])
+        for d in shift_days:
+            r = {"date": str((elec - pd.Timedelta(days=d)).date()), "firm": "Resolve", "sample_size": 1000.0}
+            r.update({p: (float(S.loc[y, p]) + (alp_offset if p == "ALP" else 0.0)) / 100.0 for p in cfg.parties})
+            rows.append(r)
+    after = {"date": "2023-05-01", "firm": "Resolve", "sample_size": 1000.0}
+    after.update({p: v / 100.0 for p, v in zip(cfg.parties, (30.0, 25.0, 20.0, 25.0))})      # an obviously different post-2023 poll
+    rows.append(after)
+    if live:
+        for dt in ("2026-08-01", "2026-09-01", "2026-10-01"):
+            r = {"date": dt, "firm": "Resolve", "sample_size": 1000.0}
+            r.update({p: v / 100.0 for p, v in zip(cfg.parties, (36.0, 33.0, 12.0, 19.0))})
+            rows.append(r)
+    return pd.DataFrame(rows)
