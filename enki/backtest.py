@@ -1,10 +1,15 @@
 """backtest.py -- walk-forward validation (both functions take the PREPARED booth table, data.prepare_booths). Refit on the elections BEFORE each target, then predict the target.
 
-What the share backtest conditions on (so read its numbers accordingly):
-  * the TRUE statewide result of the target election replaces the poll layer, so it tests the seat-local model
-    (booth effects, seat tide, booth noise), not poll error;
-  * the TRUE booth volumes of the target election weight the seat total, so it tests shares, not turnout.
-Booths that did not exist before the target are not scored. The volume backtest is separate (backtest_volumes).
+What the share backtest conditions on is chosen by a BacktestSpec, and the result table records the choice:
+  state_mode  "oracle"  the TRUE statewide result of the target election replaces the poll layer: tests the seat-local
+                        model only, NOT poll error (the optimistic, original behaviour);
+              "polls"   historical polls for each target election go through the same poll stage as a live forecast:
+                        the honest test, and it measures the real poll error (state_error, state_z);
+              "noised"  the true result plus the ASSUMED poll error budget: no historical polls needed, but it
+                        assumes the budget is right, so it cannot validate it.
+  volume_mode "actual"  the TRUE booth volumes weight the seat total (tests shares, not turnout);
+              "modelled" volumes come from the volume model fitted before the target (slow, one extra fit per target).
+Booths that did not exist before the target are not scored. The volume model's own accuracy is backtest_volumes.
 
 Metrics per target: seat error; booth MAE / RMSE / CRPS; empirical coverage of the 50/80/90/95% predictive intervals
 (predictive draws include binomial voting noise); and, on the booths present in both elections, the same errors for two
@@ -14,19 +19,40 @@ from __future__ import annotations
 
 import gc
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
-from .config import ModelConfig
+from .config import BACKTEST_STATE_MODES, BACKTEST_VOLUME_MODES, ModelConfig, PollInput
 from .data import state_matrix
+from .polls import PollSummary, draw_statewide, summarise_polls
 from .share_model import fit_share_model, simulate_shares
 from .volume_model import fit_volume_model, simulate_volumes
 
 log = logging.getLogger("enki")
 INTERVALS = (50, 80, 90, 95)
+STATE_MODES, VOLUME_MODES = BACKTEST_STATE_MODES, BACKTEST_VOLUME_MODES
+DEFAULT_NOISED_HORIZON_DAYS = 180.0
+
+
+@dataclass
+class BacktestSpec:
+    state_mode: str = "oracle"
+    volume_mode: str = "actual"
+    polls: Optional[pd.DataFrame] = None            # state_mode="polls": columns election_year, election_date, date, <parties>[, ONP, sample_size]
+    horizon_days: Optional[float] = None            # "polls": ignore polls within this many days of the election; "noised": assumed lead time
+
+    def __post_init__(self):
+        if self.state_mode not in STATE_MODES:
+            raise ValueError(f"state_mode must be one of {STATE_MODES}")
+        if self.volume_mode not in VOLUME_MODES:
+            raise ValueError(f"volume_mode must be one of {VOLUME_MODES}")
+        if self.state_mode == "polls":
+            need = {"election_year", "election_date", "date"}
+            if self.polls is None or need - set(self.polls.columns):
+                raise ValueError(f"state_mode='polls' needs backtest_polls with columns {sorted(need)} plus the party columns.")
 
 
 @dataclass
@@ -56,6 +82,45 @@ def crps_ensemble(draws: np.ndarray, actual: np.ndarray) -> np.ndarray:
     return np.abs(draws - actual[None, :]).mean(axis=0) - 0.5 * spread
 
 
+# ----------------------------------------------------------------------------- statewide layer
+def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, D: int, cfg: ModelConfig,
+                     rng: np.random.Generator, state_df: pd.DataFrame):
+    """Statewide share draws (D, K) the share model is conditioned on, plus diagnostics for the result row."""
+    if spec.state_mode == "oracle":
+        return np.tile(S_true, (D, 1)), {}
+    total = float(S_true.sum())                                    # 100, or less when ONP is kept in the denominator
+    info = {}
+    if spec.state_mode == "noised":
+        elec = pd.Timestamp("2000-01-01")                          # only the lead time matters, not the date
+        horizon = DEFAULT_NOISED_HORIZON_DAYS if spec.horizon_days is None else spec.horizon_days
+        cfg_t = replace(cfg, election_date=str(elec.date()), prediction_date=str((elec - pd.Timedelta(days=horizon)).date()))
+        tp = PollInput(float(S_true[k0]), float(S_true[k0]), float(S_true[k0]))     # no sampling error: house + horizon only
+        summ = PollSummary(100.0 * S_true / total, None, tp, None)
+    else:
+        pl = spec.polls[spec.polls["election_year"] == tgt]
+        if pl.empty:
+            raise ValueError(f"backtest_polls has no rows for election_year={tgt}.")
+        dates = pd.to_datetime(pl["election_date"]).unique()
+        if len(dates) != 1:
+            raise ValueError(f"backtest_polls must give ONE election_date per election_year (year {tgt} has {len(dates)}).")
+        elec = pd.Timestamp(dates[0])
+        asof = None if spec.horizon_days is None else elec - pd.Timedelta(days=spec.horizon_days)
+        pred = asof if asof is not None else pd.to_datetime(pl["date"]).max()
+        cfg_t = replace(cfg, election_date=str(elec.date()), prediction_date=str(pred.date()),
+                        poll_as_of=str(asof.date()) if asof is not None else None)
+        try:
+            summ = summarise_polls(pl, cfg_t, state_df)
+        except ValueError as e:
+            raise ValueError(f"backtest polls for {tgt}: {e}") from e
+    stw = draw_statewide(summ, cfg_t, D, rng)
+    info["state_se_used"] = float(stw.se_parts[3])
+    if spec.state_mode == "polls":
+        info.update(poll_central=float(stw.central[k0]), state_actual=float(S_true[k0]),
+                    state_error=float(stw.central[k0] - S_true[k0]),
+                    state_z=float((S_true[k0] - stw.central[k0]) / stw.se_parts[3]))
+    return stw.S * (total / 100.0), info
+
+
 # ----------------------------------------------------------------------------- share backtest
 def _baselines(row: dict, df_all: pd.DataFrame, S_all: pd.DataFrame, cfg: ModelConfig, tgt: int, last_y: int,
                t: pd.DataFrame, act: np.ndarray, n_t: np.ndarray, med: np.ndarray, crps: np.ndarray) -> None:
@@ -77,7 +142,9 @@ def _baselines(row: dict, df_all: pd.DataFrame, S_all: pd.DataFrame, cfg: ModelC
 
 
 def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConfig,
-                    targets: Optional[Sequence[int]] = None, return_draws: bool = False) -> BacktestResult:
+                    targets: Optional[Sequence[int]] = None, return_draws: bool = False,
+                    spec: Optional[BacktestSpec] = None) -> BacktestResult:
+    spec = spec or BacktestSpec()
     years = sorted(df_all["year"].unique())
     parties = list(cfg.parties)
     k0 = parties.index(cfg.party)
@@ -88,9 +155,11 @@ def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConf
     for tgt in (targets if targets is not None else years[2:]):
         tgt = int(tgt)
         rng = np.random.default_rng(cfg.seed + tgt)           # per-target stream: re-running one target reproduces its row
-        fit = fit_share_model(df_all[df_all["year"] < tgt], cfg, state_df)
+        train = df_all[df_all["year"] < tgt]
+        fit = fit_share_model(train, cfg, state_df)
         D = fit.n_draws
-        p = simulate_shares(fit, np.tile(S_all.loc[tgt].values, (D, 1)), cfg, rng).p
+        S_draws, state_info = _statewide_draws(spec, tgt, S_all.loc[tgt].values, k0, D, cfg, rng, state_df)
+        p = simulate_shares(fit, S_draws, cfg, rng).p
 
         t = df_all[(df_all["year"] == tgt) & df_all["booth"].isin(fit.booth_names)]
         col = [fit.booth_names.index(b) for b in t["booth"]]
@@ -104,13 +173,22 @@ def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConf
         rep = 100.0 * rng.binomial(n_t[None, :], p[:, col, k0]) / n_t[None, :]       # predictive draws incl. voting noise
         calib = interval_coverage(rep, act)
         crps = crps_ensemble(rep, act)
-        seat = (P * n_t).sum(axis=1) / n_t.sum()
+        if spec.volume_mode == "modelled":
+            vfit = fit_volume_model(train, cfg)
+            if vfit.names != fit.booth_names:
+                raise RuntimeError("Booth order differs between share and volume models.")
+            prev = train[train["year"] == int(train["year"].max())].set_index("booth")["n"]
+            Vc = simulate_volumes(vfit, D, cfg, rng, target_year=tgt, active=np.array([b in prev.index for b in vfit.names]))[:, col]
+            seat = (P * Vc).sum(axis=1) / np.maximum(Vc.sum(axis=1), 1.0)
+        else:
+            seat = (P * n_t).sum(axis=1) / n_t.sum()
         seat_act = float((act * n_t).sum() / n_t.sum())
         s_lo, s50, s_hi = np.percentile(seat, [lo_p, 50, hi_p])
         err = med - act
 
         row = {"target": tgt, "seat_pred_median": s50, "seat_actual": seat_act, "seat_error": s50 - seat_act,
-               "seat_lo": s_lo, "seat_hi": s_hi, "seat_in_interval": bool(s_lo <= seat_act <= s_hi),
+               "seat_lo": s_lo, "seat_hi": s_hi, "seat_width": s_hi - s_lo, "seat_in_interval": bool(s_lo <= seat_act <= s_hi),
+               "state_mode": spec.state_mode, "volume_mode": spec.volume_mode, **state_info,
                "booth_MAE": float(np.abs(err).mean()), "booth_RMSE": float(np.sqrt((err ** 2).mean())), "booth_CRPS": float(crps.mean()),
                **{f"booth_cover_{lv}": calib[f"cover_{lv}"] for lv in INTERVALS}, "calib_bias_90": calib["bias_90"],
                "n_booths": len(t), "divergences": fit.divergences, "rhat_max": float(fit.diag["r_hat"].max())}

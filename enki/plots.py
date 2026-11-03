@@ -145,7 +145,7 @@ def booth_swing_scatter(res, output_path, label_all: bool = True, dpi: int = 300
 _BACKTEST_COLUMNS = {   # column -> header. Model and baselines are compared on the SAME (common) booths.
     "target": "target", "seat_pred_median": "seat pred\nmedian", "seat_actual": "seat\nactual", "seat_error": "MODEL\nseat err (all)",
     "model_seat_err_common": "MODEL\nseat err", "nochange_seat_err": "NO-CHANGE\nseat err", "statewide_swing_seat_err": "STATE-SWING\nseat err",
-    "seat_in_interval": "in 90%\ninterval", "model_MAE_common": "MODEL\nbooth MAE", "nochange_MAE": "NO-CHANGE\nbooth MAE",
+    "seat_in_interval": "in 90%\ninterval", "seat_width": "90% band\nwidth", "state_error": "poll err\n(pts)", "model_MAE_common": "MODEL\nbooth MAE", "nochange_MAE": "NO-CHANGE\nbooth MAE",
     "statewide_swing_MAE": "STATE-SWING\nbooth MAE", "booth_CRPS": "MODEL\nbooth CRPS", "booth_cover_50": "50% cover\n(target 50)",
     "booth_cover_90": "90% cover\n(target 90)", "booth_cover_95": "95% cover\n(target 95)"}
 

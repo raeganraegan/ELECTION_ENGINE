@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import enki
 from enki import backtest, forecast
+from dataclasses import replace
+
+from enki.backtest import BacktestSpec
 from enki.config import ModelConfig, RunOptions, beta_prior_table
 from enki.data import NSW_STATE_RESULTS, prepare_booths, state_matrix
 from enki.onp import apply_onp
@@ -20,7 +23,7 @@ from enki.pipeline import check_trace
 from enki.polls import _pct_scale, draw_statewide, summarise_polls
 from enki.share_model import check_layers, simulate_shares
 from enki.volume_model import projected_votes_from_electors, resolve_volumes
-from fake_fit import fake_fit_factory, make_booths, make_polls
+from fake_fit import fake_fit_factory, fake_volume_fit, make_backtest_polls, make_booths, make_polls
 
 
 def patched(D=200):
@@ -280,6 +283,74 @@ class TestBacktest(Base):
             full = backtest.backtest_shares(self.df, NSW_STATE_RESULTS, self.cfg).table
             one = backtest.backtest_shares(self.df, NSW_STATE_RESULTS, self.cfg, targets=[2023]).table
         pd.testing.assert_series_equal(full[full["target"] == 2023].iloc[0], one.iloc[0], check_names=False)
+
+
+class TestBacktestModes(Base):
+    def _run(self, cfg=None, **spec_kw):
+        cfg = cfg or ModelConfig(prediction_date="2026-11-01", poll_house_sd=6.0)
+        df = prepare_booths(self.booths, cfg)
+        _, b = patched(300)
+        with b, mock.patch("enki.backtest.fit_volume_model", fake_volume_fit):
+            return backtest.backtest_shares(df, NSW_STATE_RESULTS, cfg, spec=BacktestSpec(**spec_kw)).table
+
+    def test_modes_recorded_and_oracle_has_no_poll_columns(self):
+        t = self._run()
+        self.assertEqual(set(t["state_mode"]), {"oracle"})
+        self.assertNotIn("state_error", t.columns)
+
+    def test_polls_mode_measures_poll_error_and_widens_the_band(self):
+        cfg = ModelConfig(prediction_date="2026-11-01", poll_house_sd=6.0)
+        bp = make_backtest_polls(NSW_STATE_RESULTS, cfg)
+        oracle, polls = self._run(cfg), self._run(cfg, state_mode="polls", polls=bp)
+        self.assertEqual(set(polls["state_mode"]), {"polls"})
+        self.assertTrue(polls["state_error"].between(0.5, 2.0).all())                 # ALP was over-polled by 1.5 points before renormalising
+        self.assertTrue(np.isfinite(polls["state_z"]).all())
+        self.assertGreater(polls["seat_width"].mean(), oracle["seat_width"].mean())   # poll error now reaches the seat
+
+    def test_polls_horizon_changes_the_forecast_lead_time(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        bp = make_backtest_polls(NSW_STATE_RESULTS, cfg)
+        latest = self._run(cfg, state_mode="polls", polls=bp)                              # forecast made at the last poll (30 days out)
+        early = self._run(cfg, state_mode="polls", polls=bp, horizon_days=100.0)           # made 100 days out, so only the 150-day-out poll counts
+        self.assertTrue((early["state_se_used"] > latest["state_se_used"]).all())          # longer lead time and fewer polls: more error
+
+    def test_noised_mode_uses_the_error_budget(self):
+        cfg = ModelConfig(prediction_date="2026-11-01", poll_house_sd=2.0, time_horizon_gamma=1.0)
+        t = self._run(cfg, state_mode="noised", horizon_days=365.0)
+        np.testing.assert_allclose(t["state_se_used"], np.sqrt(2.0 ** 2 + 1.0 ** 2), rtol=1e-6)
+
+    def test_bad_polls_input_is_a_clear_error(self):
+        with self.assertRaises(ValueError):
+            BacktestSpec(state_mode="polls", polls=None)
+        with self.assertRaises(ValueError):
+            BacktestSpec(state_mode="sometimes")
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        bp = make_backtest_polls(NSW_STATE_RESULTS, cfg, years=(2015, 2019))              # 2023 missing
+        with self.assertRaises(ValueError) as e:
+            self._run(cfg, state_mode="polls", polls=bp)
+        self.assertIn("2023", str(e.exception))
+
+    def test_modelled_volumes_run_and_keep_the_actual_seat(self):
+        cfg = ModelConfig(prediction_date="2026-11-01")
+        a, m = self._run(cfg), self._run(cfg, volume_mode="modelled")
+        self.assertEqual(set(m["volume_mode"]), {"modelled"})
+        np.testing.assert_allclose(a["seat_actual"], m["seat_actual"])
+        self.assertTrue(np.isfinite(m["seat_width"]).all())
+
+    def test_ENKI_flags_the_optimistic_default_and_requires_polls(self):
+        a, b = patched(100)
+        base = {"booth_results": self.booths, "polls": make_polls(), "registered_electors": 60000, "prediction_date": "2026-11-01",
+                "run_forecast": False, "print_report": False, "verbose": False, "backtest_targets": [2023]}
+        with a, b:
+            y = enki.ENKI(base)
+            self.assertTrue(any("TRUE statewide result" in w for w in y.warnings))
+            with self.assertRaises(KeyError):
+                enki.ENKI({**base, "backtest_state_mode": "polls"})
+            y2 = enki.ENKI({**base, "backtest_state_mode": "polls", "backtest_polls": make_backtest_polls(NSW_STATE_RESULTS, ModelConfig())})
+            self.assertFalse(any("TRUE statewide result" in w for w in y2.warnings))
+            self.assertIn("state_error", y2.backtest.columns)
+        with self.assertRaises(ValueError):
+            enki.resolve({"booth_results": self.booths, "polls": make_polls(), "backtest_state_mode": "nope"})
 
 
 class TestEndToEnd(Base):

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import pandas as pd
 
 from . import plots
-from .backtest import backtest_shares, backtest_volumes
+from .backtest import BacktestSpec, backtest_shares, backtest_volumes
 from .config import RENAMED, ModelConfig, PollInput, RunOptions, validate
 from .data import NSW_STATE_RESULTS, prepare_booths, read_frame
 from .forecast import Forecast, run_forecast
@@ -27,7 +27,7 @@ from .pipeline import check_trace
 from .report import print_run_report
 
 log = logging.getLogger("enki")
-_DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year")
+_DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year", "backtest_polls")
 _TUPLE_FIELDS = ("parties", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
 
 
@@ -131,6 +131,17 @@ def resolve(x) -> Resolved:
         if cfg.registered_electors is not None:
             warnings_.append("projected_formal_votes AND registered_electors are both set: projected_formal_votes wins.")
     data["target_year"] = flat.get("target_year")
+    if flat.get("backtest_polls") is not None:
+        data["backtest_polls"] = read_frame(flat["backtest_polls"], "backtest_polls")
+        src["backtest_polls"] = _source(flat["backtest_polls"])
+    elif run.run_backtest and run.backtest_state_mode == "polls":
+        raise KeyError("ENKI(x): backtest_state_mode='polls' needs 'backtest_polls' (historical polls with election_year, "
+                       "election_date and date columns).")
+    if run.run_backtest and run.backtest_state_mode == "oracle":
+        warnings_.append("Backtest is conditional on the TRUE statewide result and says nothing about poll error. Use "
+                         "backtest_state_mode='polls' (with backtest_polls) or 'noised' for an end-to-end test.")
+    if run.run_backtest and run.backtest_volume_mode == "actual":
+        warnings_.append("Backtest uses the TRUE booth volumes, so it says nothing about turnout error (backtest_volume_mode='modelled').")
     return Resolved(data, cfg, run, warnings_, src)
 
 
@@ -207,7 +218,8 @@ def ENKI(x) -> ENKIOutput:
 
     if run.run_backtest:
         log.info("RUNNING HISTORICAL BACKTEST")
-        bt = backtest_shares(df, state_df, cfg, run.backtest_targets, return_draws=True)
+        spec = BacktestSpec(run.backtest_state_mode, run.backtest_volume_mode, data.get("backtest_polls"), run.backtest_poll_horizon_days)
+        bt = backtest_shares(df, state_df, cfg, run.backtest_targets, return_draws=True, spec=spec)
         y.backtest, y.backtest_draws = bt.table, bt.draws
     if run.run_volume_backtest:
         y.volume_backtest = backtest_volumes(df, cfg, run.backtest_volume_sims, run.backtest_targets)

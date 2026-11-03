@@ -13,8 +13,10 @@ def main():
         "onp_mode": "none",
         "onp_state_denominator": False,
 
-        #keep else it doesnt generate anything at all.
-        "output_root": "forecast_output",            # uncomment to write CSVs, plots and npz files
+        "output_root": "forecast_output",     
+        "registered_electors": 59200
+        # "backtest_state_mode": "polls",
+        # "backtest_polls": "sample_polls.csv",# uncomment to write CSVs, plots and npz files
     }
     return ENKI(balmain)
 

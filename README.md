@@ -417,7 +417,20 @@ $$
 
 ## Backtest
 
-`backtest_shares` refits on the elections before each target and predicts it. It **conditions on the true statewide result** (no poll error) and **the true booth volumes**, so it tests the seat-local model, not polling or turnout. Reported per target: seat error; booth MAE, RMSE and CRPS; empirical coverage of the 50/80/90/95% predictive intervals (draws include binomial voting noise); and, on booths present in both elections, the model's MAE / seat error beside a no-change and a statewide-swing baseline. Each target has its own random stream (`seed + year`), so rerunning one target reproduces its row.
+`backtest_shares` refits on the elections before each target and predicts it. What it is *given* about the target is a choice, and the result table records it (`state_mode`, `volume_mode`):
+
+| Setting | Value | Meaning |
+| ----- | ----- | ----- |
+| `backtest_state_mode` | `"oracle"` (default) | The **true** statewide result is used, so poll error is never tested. This only tests the seat-local model. ENKI warns when you use it. |
+| | `"polls"` | Historical polls for each past election go through the same poll stage as a live forecast. This is the honest end-to-end test, and it measures the real poll error (`state_error`, `state_z`). Needs `backtest_polls`. |
+| | `"noised"` | The true result plus the *assumed* error budget (`poll_house_sd`, `time_horizon_gamma`). Needs no historical polls, but it assumes the budget is right, so it cannot check it. |
+| `backtest_volume_mode` | `"actual"` (default) | True booth volumes weight the seat total, so turnout error is never tested. |
+| | `"modelled"` | Volumes come from the volume model fitted before the target (one extra fit per election, slow). |
+| `backtest_poll_horizon_days` | number or `None` | `"polls"`: ignore polls within this many days of the election (so you score a forecast made, say, 180 days out). `"noised"`: the assumed lead time (default 180). |
+
+`backtest_polls` is a table with one row per poll: `election_year`, `election_date` (one per year), `date`, a column for each modelled party, and optionally `ONP` and `sample_size`. It needs the same ONP column as a live forecast if `onp_mode="entry"` or `onp_state_denominator` is on.
+
+Reported per target: seat error and the width of the 90% band (`seat_width`); booth MAE, RMSE and CRPS; empirical coverage of the 50/80/90/95% predictive intervals (draws include binomial voting noise); and, on booths present in both elections, the model beside a no-change and a statewide-swing baseline. In `"polls"` mode also the poll's error on the target party and `state_z`, how many of the assumed standard errors the actual result was away. If `state_z` is routinely beyond about 1, `poll_house_sd` and `time_horizon_gamma` are too small. Each target has its own random stream (`seed + year`), so rerunning one target reproduces its row. One Nation is not applied in the backtest. Booths that did not exist before the target are not scored.
 
 ## Known Limitations
 
@@ -427,7 +440,9 @@ Things the model does not do, or does only weakly. None are bugs; they bound wha
 
 * **Spatial Autocorrelation (CAR/SAR) is omitted.** Booth-level noise ($\varepsilon$) is spatially independent; ignoring physical proximity/neighborhood demographic clustering means seat prediction bands can be slightly underdispersed.
 
-* **The backtest is conditional** on the true statewide result, so it says nothing about poll error. The poll error budget (`poll_house_sd`, `time_horizon_gamma`) is set by hand.
+* **The default backtest is optimistic.** `backtest_state_mode="oracle"` and `backtest_volume_mode="actual"` give the model the true statewide result and true volumes. Use `"polls"` with historical polls (and `"modelled"` volumes) for an honest end-to-end score. The poll error budget (`poll_house_sd`, `time_horizon_gamma`) is set by hand; `state_z` in a `"polls"` backtest is the check on it.
+
+* **Few elections per seat.** A seat has only a handful of past elections, so a backtest has a handful of seat-level outcomes. Judge the model across many seats, not one.
 
 * **Auto-calibrated prior scales** reuse the data twice and treat a raw-share sd as a log-ratio scale; they are a regularising heuristic.
 

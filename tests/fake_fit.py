@@ -51,3 +51,31 @@ def fake_fit_factory(D: int = 200):
         diag = pd.DataFrame({"parameter": ["m[0]"], "r_hat": [1.0], "ess_bulk": [1000.0]})
         return ShareFit(des, draws, diag, 0)
     return fake_fit
+
+
+def make_backtest_polls(state_df, cfg, years=(2015, 2019, 2023), alp_offset=1.5) -> pd.DataFrame:
+    """Historical poll table: three polls per election at 150/90/30 days out, ALP over-polled by alp_offset points."""
+    from enki.data import state_matrix
+    S = state_matrix(state_df, cfg.parties, list(years))
+    rows = []
+    for y in years:
+        elec = pd.Timestamp(f"{y}-03-25")
+        for d in (150, 90, 30):
+            r = {"election_year": y, "election_date": str(elec.date()), "date": str((elec - pd.Timedelta(days=d)).date()), "sample_size": 1000}
+            r.update({p: float(S.loc[y, p]) + (alp_offset if p == "ALP" else 0.0) for p in cfg.parties})
+            rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def fake_volume_fit(df: pd.DataFrame, cfg: ModelConfig):
+    """A stand-in for fit_volume_model: no MCMC, same shape of result."""
+    from enki.volume_model import VolumeFit
+    names = sorted(df["booth"].unique())
+    years = sorted(int(y) for y in df["year"].unique())
+    rng = np.random.default_rng(11)
+    S, B, T = 150, len(names), len(years)
+    btype = df.groupby("booth")["btype"].max().reindex(names).values.astype(float)
+    totals = df.groupby("year")["n"].sum().reindex(years).values.astype(float)
+    diag = pd.DataFrame({"parameter": ["kappa"], "r_hat": [1.0], "ess_bulk": [1000.0]})
+    return VolumeFit(names, years, btype, 0, totals, 0, diag,
+                     {"a": 0.1 * rng.standard_normal((S, B)), "tau": np.zeros((S, T)), "kappa": np.full(S, 500.0)})
