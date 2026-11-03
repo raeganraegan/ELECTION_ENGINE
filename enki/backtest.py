@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 
 try:
     from .config import BACKTEST_STATE_MODES, BACKTEST_VOLUME_MODES, ModelConfig, PollInput
+    
     from .data import NSW_ELECTION_DATES, state_matrix
     from .polls import PollSummary, draw_statewide, summarise_polls
     from .share_model import fit_share_model, simulate_shares
@@ -194,7 +195,7 @@ def cycle_polls(spec: BacktestSpec, tgt: int):
     return sub, elec
 
 
-def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, D: int, cfg: ModelConfig,
+def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, D: int, cfg: ModelConfig, # type: ignore
                      rng: np.random.Generator, state_df: pd.DataFrame):
     mode, note, pl, elec = spec.state_mode, None, None, None
     if mode in ("polls", "auto"):
@@ -244,7 +245,7 @@ def _statewide_draws(spec: BacktestSpec, tgt: int, S_true: np.ndarray, k0: int, 
 
 
 # ----------------------------------------------------------------------------- share backtest
-def _baselines(row: dict, df_all: pd.DataFrame, S_all: pd.DataFrame, cfg: ModelConfig, tgt: int, last_y: int,
+def _baselines(row: dict, df_all: pd.DataFrame, S_all: pd.DataFrame, cfg: ModelConfig, tgt: int, last_y: int, # type: ignore
                t: pd.DataFrame, act: np.ndarray, n_t: np.ndarray, med: np.ndarray, crps: np.ndarray) -> None:
     last = df_all[df_all["year"] == last_y].set_index("booth")["share"]
     mk = np.array([b in last.index for b in t["booth"]])
@@ -262,7 +263,7 @@ def _baselines(row: dict, df_all: pd.DataFrame, S_all: pd.DataFrame, cfg: ModelC
                 "statewide_swing_seat_err": wavg(errs["statewide_swing"])})
 
 
-def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConfig,
+def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConfig, # type: ignore
                     targets: Optional[Sequence[int]] = None, return_draws: bool = False,
                     spec: Optional[BacktestSpec] = None) -> BacktestResult:
     spec = spec or BacktestSpec()
@@ -346,7 +347,7 @@ def backtest_shares(df_all: pd.DataFrame, state_df: pd.DataFrame, cfg: ModelConf
 
 
 # ----------------------------------------------------------------------------- volume backtest
-def backtest_volumes(df: pd.DataFrame, cfg: ModelConfig, sims: int = 4000,
+def backtest_volumes(df: pd.DataFrame, cfg: ModelConfig, sims: int = 4000, # type: ignore
                      targets: Optional[Sequence[int]] = None) -> pd.DataFrame:
     years = sorted(df["year"].unique())
     rows = []

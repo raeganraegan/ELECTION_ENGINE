@@ -92,6 +92,9 @@ class ModelConfig:
     share_clip_floor: float = 1e-3                             # statewide shares are clipped to at least this (%)
 
     # ---- volumes (formal votes per booth). Priority: projected_formal_votes > registered_electors > fitted model
+    # NOTE: You can basically ignore this section if you legit just plug in the number of electors (which is available in most cases)
+    # NOTE: This part is really untuned and is present cos i tried to apply this to somewhere where the turnout was not mandatory.
+    
     registered_electors: Optional[float] = None
     expected_turnout_rate: float = 0.90
     informal_rate_fallback: float = 0.04                       # used only when the booth file has no votes to infer a rate from
@@ -117,7 +120,7 @@ class ModelConfig:
 
     # ---- OPV step (Step 8): finalists + preference flows -> two-candidate-preferred and exhaustion
     opv_flows: Optional[Dict[str, Dict[str, Sequence[float]]]] = None   # {"ALP_vs_LNP": {"GRN": [to ALP, to LNP, exhausted], ...}, ...}; None -> data.NSW_PREF_FLOWS
-    opv_flow_conc: Optional[float] = None                      # None: flow rates fixed; a number: each draw's rates ~ Dirichlet(conc * rates) (smaller = more flow uncertainty)
+    opv_flow_conc: Optional[float] = 133.0                      # None: flow rates fixed; a number: each draw's rates ~ Dirichlet(conc * rates) (smaller = more flow uncertainty)
     opv_finalist_exclude: Sequence[str] = ("OTHER",)           # catch-all buckets that cannot be a finalist
     opv_min_pair_prob: float = 0.9                             # warn when the reported finalist pairing occurs in fewer draws than this
 
