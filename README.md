@@ -2,8 +2,6 @@
 
 This readme is a wip and is definitely not up to convention on how to write a readme, but you'll have to suck it up and just read whats going on.
 
-#### NOTE THIS README DOESN'T HAVE DOCUMENTATION ON OPV YET, BUT ITS PRESENT.
-
 ## Project Metadata
 
 #### **Project Name:**
@@ -26,16 +24,17 @@ Note, this has been tuned/calibrated to the upcoming [NSW state election](https:
 
 #### **Files:**
 
-Dependencies point one way only: each module imports from the ones above it, never below.
+Dependencies point one way only (no cycles); `plots.py` is a leaf that imports nothing from `enki`.
 
 | File | What it is |
 | ----- | ----- |
 | `enki/config.py` | Every setting (`ModelConfig`, `RunOptions`), defaults, validation. No logic. |
-| `enki/data.py` | Booth CSV -> clean table, statewide results, `NSW_STATE_RESULTS`. |
+| `enki/data.py` | Booth CSV -> clean table, statewide results, `NSW_STATE_RESULTS`, `NSW_PREF_FLOWS` (default OPV flows). |
 | `enki/polls.py` | Step 2: poll average, error budget, statewide Dirichlet draws. |
 | `enki/share_model.py` | Steps 0, 1, 3, 4: the PyMC fit and `simulate_shares`. |
 | `enki/volume_model.py` | Step 5: booth volumes (projected / electors / fitted). |
 | `enki/onp.py` | Step 6: One Nation (`none` / `brian` / `entry`). |
+| `enki/opv.py` | Step 8: OPV count (finalists, preference flows, 2CP, exhaustion). |
 | `enki/pipeline.py` | Step registry, `build_trace`, `check_trace`. |
 | `enki/forecast.py` | Runs the steps once, builds result tables and uncertainty attribution. |
 | `enki/backtest.py` | Walk-forward validation and scoring (coverage, CRPS, baselines). Depends on the model, never the reverse. |
@@ -54,8 +53,11 @@ y = ENKI({"booth_results": "booths.csv", "polls": "polls.csv", "seat_name": "Bal
           "onp_mode": "none",        # "none" | "brian" | "entry"
           "run_backtest": False})    # the backtest is on by default and refits once per past election
 y.seat_summary      # seat-wide primary vote per party (mean + percentiles)
+y.opv               # OPV result: finalist pairings, P(win), 2CP, exhaustion (None if run_opv is off)
 y.config            # the fully resolved settings that were actually run
 ```
+
+Default MCMC settings (`draws=500, tune=500, chains=2, target_accept=0.95`) are reduced for testing; use 2000 / 2000 / 4 / 0.99 for a real run.
 
 Old keys give a precise error naming their replacement (`brian_mode` -> `onp_mode='brian'`, `onp_layer` -> `onp_mode='entry'`, `local_priors`/`beta_g`/... -> `beta_priors`).
 
@@ -79,9 +81,9 @@ As should be somewhat self evident, the program produces all the probability dis
 
 Each run also saves `inputs_resolved.json` (every setting actually used) and, with `record_trace` on, a `trace.npz` holding the signal at each step above.
 
-# V3.3 Cool New Plots (OPV!)
+# OPV Outputs
 
-Hi I forgot to add opv to this readme but it generates cool images!
+Written to `<output_root>/<seat>/<date>/ENKI/opv/` (figures need `make_plots`): `booth_2cp.csv`, `seat_2cp_draws.csv`, `finalist_pair_probs.csv`, `win_probs.csv`, and five figures: `booth_raw_first_preference_breakdown.png`, `booth_2cp_exhausted_breakdown.png`, `booth_2cp_uncertainty_forest.png`, `exhausted_vs_support_scatter.png`, `seat_outcome_distribution.png`.
 
 ![image4](/Showcase/opv1.png)
 ![image4](/Showcase/opv2.png)
@@ -90,7 +92,7 @@ Hi I forgot to add opv to this readme but it generates cool images!
 
 # Election Engine (`enki/`) Model Specifications
 
-This part of the document outlines the step-by-step mathematical model and equation pipeline for [ENKI Election Engine](/enki/). It starts with the assumptions and notation, gives the whole model in two equations, then walks through each step. Every step lists the function in `ENKI_V3.py` that does it, and says where the code does something the equations alone would not tell you.
+This part of the document outlines the step-by-step mathematical model and equation pipeline for [ENKI Election Engine](/enki/). It starts with the assumptions and notation, gives the whole model in two equations, then walks through each step. Every step lists the function in `enki/` that does it, and says where the code does something the equations alone would not tell you.
 
 **Notation.** Parties are indexed $k = 1 \dots K$, with the **last party (default `OTHER`) as the reference category** ($k=K$). Booths are $b$, past elections are $t = 1 \dots T$, and $n$ is the number of election cycles between the last election and the target ($n=1$ for 2027). $i$ indexes a posterior draw.
 
@@ -98,9 +100,9 @@ This part of the document outlines the step-by-step mathematical model and equat
 
 * **Booth Continuity:** Polling places maintain consistent catchments over time; historical venue changes are manually merged upfront (`booth_merge`). Booths with no history cannot be forecast, and redistributions that change a booth's catchment are not modelled.
 
-* **Sum-to-One Consistency:** Booth party shares come from a softmax (multinomial-logit link), so every booth sums to 100% in every draw, and so does the volume-weighted seat total.
+* **Sum-to-One Consistency:** Booth party shares come from a softmax (multinomial-logit link), so every booth sums to 100% in every draw, and so does the volume-weighted seat total. Logits are soft-capped at $\pm 3.5$ (tanh) before the softmax.
 
-* **Hierarchical Local Swing Elasticity:** Every non-reference party (default `ALP`, `LNP`, `GRN`) responds to its own statewide log-share swing through a booth-specific sensitivity $\beta_{kb}$, drawn around a party-level mean $\mu_{\beta,k}$. This lets individual catchments differ in how strongly they follow the state. The reference party (`OTHER`) carries **no** statewide term ($\beta_{Kb}=0$): the seat's independents are structurally decoupled from statewide movement, and the `OTHER` poll number is never used to move booth shares. *See Known Limitations: the party-level mean* $\mu_{\beta,k}$ *is mostly set by its prior, not by the data.*
+* **Hierarchical Local Swing Elasticity:** Every party responds to its own statewide log-share swing through a booth-specific sensitivity $\beta_{kb}$, drawn around a party-level mean $\mu_{\beta,k}$ that is **centred to sum to zero across all $K$ parties**. This lets individual catchments differ in how strongly they follow the state. *See Known Limitations: the party-level mean* $\mu_{\beta,k}$ *is mostly set by its prior, not by the data.*
 
 * **Seat-Wide Local Shift & Dynamics:** Local candidate effects and scandals form an electorate-wide trend $d_{kt}$ per party. Configured either via stationary AR(1) persistence $\rho$ (`tide_process="ar1"`, prior $\text{Beta}(2,2)$) or a non-stationary secular drift (`tide_process="random_walk"`).
 
@@ -110,7 +112,9 @@ This part of the document outlines the step-by-step mathematical model and equat
 
 * **Vote Volume Conservation:** Booth volumes are a *share* of a seat total, so a fall in election-day booths shows up as growth in early/postal voting while the total is conserved. The total is either forecast from history or, if you supply enrolment, computed from enrolment $\times$ turnout (see Step 5).
 
-* **Wildcard Entry (ONP):** One Nation cannot be inferred from this seat's history, so it enters through one explicit rule chosen by `onp_mode`: `"brian"` (default 20% of the LNP vote and 5% of the ALP vote go to ONP; set with `brian_transfer`) or `"entry"` (scaled from the statewide ONP poll, which must then exist in the polls table).
+* **Wildcard Entry (ONP):** One Nation cannot be inferred from this seat's history, so it enters through one explicit rule chosen by `onp_mode`: `"none"` (default), `"brian"` (20% of the LNP vote and 5% of the ALP vote go to ONP; set with `brian_transfer`) or `"entry"` (scaled from the statewide ONP poll, which must then exist in the polls table).
+
+* **Preferences (OPV):** In each draw the finalists are the top two seat-wide primaries (`OTHER` excluded); every other party's votes follow seat-wide flow rates [to finalist 1, to finalist 2, exhausted] (Step 8).
 
 ### Parameter & Input Definitions
 
@@ -196,13 +200,13 @@ $$
 \boldsymbol{V} \sim \text{Multinomial}\big(T',\ \boldsymbol{q}\big), \quad \boldsymbol{q} \sim \text{Dirichlet}\big(\kappa\,\text{softmax}(\boldsymbol{a} + \tau'\,\text{early})\big), \quad T' = T_T \exp\!\big(n\hat\mu_g + \sqrt{n}\,\hat\sigma_g z_T\big)
 $$
 
-with $\boldsymbol{S} \sim \text{Dirichlet}(\text{conc}\cdot\hat{\boldsymbol{s}})$ from the poll aggregate. If `use_correlated_errors=True`, error vectors $\boldsymbol{\varepsilon}_b$ and tide shocks $\boldsymbol{z}_d$ are generated via Cholesky factor transformation $\mathbf{L}_{\Omega} \boldsymbol{z}$. If you supply enrolment (`registered_electors`) or `projected_formal_votes`, $\boldsymbol{V}$ is fixed instead (Step 5). With `onp_mode="entry"` the ONP row is the entry layer of Step 6 instead.
+with $\boldsymbol{S} \sim \text{Dirichlet}(\text{conc}\cdot\hat{\boldsymbol{s}})$ from the poll aggregate. If `use_correlated_errors=True`, error vectors $\boldsymbol{\varepsilon}_b$ and tide shocks $\boldsymbol{z}_d$ are generated via Cholesky factor transformation $\mathbf{L}_{\Omega} \boldsymbol{z}$. If you supply enrolment (`registered_electors`) or `projected_formal_votes`, $\boldsymbol{V}$ is fixed instead (Step 5). With `onp_mode="entry"` the ONP row is the entry layer of Step 6 instead. Step 8 then turns $p'$ and $V$ into two-candidate-preferred results.
 
 ## ENKI Step by Step
 
 ### Pipeline Overview
 
-The steps are numbered 0 to 7, but they are **not** a single line. Polls (2) and Volumes (5) are side inputs, and Volumes joins only at the very end. Read the "Needs" column, or the diagram, for what actually depends on what.
+The steps are numbered 0 to 8, but they are **not** a single line. Polls (2) and Volumes (5) are side inputs, and Volumes joins only at the very end. Read the "Needs" column, or the diagram, for what actually depends on what.
 
 ```mermaid
 flowchart LR
@@ -214,7 +218,8 @@ flowchart LR
     O --> S["7 Seat Primary<br/>forecast.py"]
     D -.-> V["5 Volumes (Optional)<br/>volume_model.py"]
     V -.-> S
-    S --> N["8 OPV Flows<br/>opv.py"]
+    O --> N["8 OPV (Optional)<br/>opv.py"]
+    V -.-> N
 ```
 
 | Step | Needs | Input $\rightarrow$ Output | What happens | Code |
@@ -227,8 +232,9 @@ flowchart LR
 | **5. Volumes** | 0 (or enrolment) | $\rightarrow V_b$ | Enrolment path, or fitted volume model | `volume_model.resolve_volumes` |
 | **6. ONP** | 4 (and 2 if `entry`) | $p_b \rightarrow p'_b$ | `brian` transfer or `entry` layer; mass-conserving | `onp.apply_onp` |
 | **7. Aggregate** | 5, 6 | $\rightarrow y$ | Volume-weighted seat shares, percentiles, uncertainty attribution | `forecast.run_forecast` |
+| **8. OPV** | 5, 6 | $V_b, p'_b \rightarrow$ 2CP | Per-draw finalists, preference flows, 2CP, exhaustion, P(win); optional (`run_opv`) | `opv.compute_opv` |
 
-Steps 3 and 4 are one function (`simulate_shares`) because the same random draws feed both. Each step returns a typed result (`PollSummary`, `ShareSim`, `VolumeResult`, `OnpResult`) and `pipeline.build_trace` flattens them into the `s<step>_<name>` signals. The step list itself lives in `enki/pipeline.py` (`PIPELINE_STEPS`, `PIPELINE_EDGES`), and `check_trace` flags any step whose signals are missing.
+Steps 3 and 4 are one function (`simulate_shares`) because the same random draws feed both. Each step returns a typed result (`PollSummary`, `ShareSim`, `VolumeResult`, `OnpResult`, `OpvResult`) and `pipeline.build_trace` flattens them into the `s<step>_<name>` signals. The step list itself lives in `enki/pipeline.py` (`PIPELINE_STEPS`, `PIPELINE_EDGES`), and `check_trace` flags any step whose signals are missing.
 
 ## Detailed Model Equations
 
@@ -248,7 +254,7 @@ $$
 x_{kt} = \ln S_{kt} - \overline{\ln S_k}, \qquad \overline{\ln S_k} = \tfrac{1}{T}\textstyle\sum_t \ln S_{kt}
 $$
 
-$S_{kt}$ is party $k$'s statewide share at election $t$. By default ONP stays in the denominator (`onp_state_denominator`), so the named-party shares sum to less than 100 and a high ONP poll does not inflate the other parties.
+$S_{kt}$ is party $k$'s statewide share at election $t$. With `onp_state_denominator=True` (default `False`) ONP stays in the denominator, so the named-party shares sum to less than 100 and a high ONP poll does not inflate the other parties; otherwise they are renormalised to 100.
 
 ### 1. Model Fitting & Priors
 
@@ -263,20 +269,20 @@ $$
 $$
 
 $$
-\eta_{kbt} = m_k + \alpha_{kb} + \beta_{kb} x_{kt} + d_{kt} + \varepsilon_{kbt}, \qquad m_K = 0,\ \ \beta_{Kb} = 0
+\eta_{kbt} = 3.5\tanh\!\big(\tilde\eta_{kbt}/3.5\big), \qquad \tilde\eta_{kbt} = m_k + \alpha_{kb} + \beta_{kb} x_{kt} + d_{kt} + \varepsilon_{kbt}, \qquad \textstyle\sum_k m_k = \sum_k \mu_{\beta,k} = 0
 $$
 
 #### Priors & Dynamics:
 
-* **Sensitivity (non-reference parties $k \lt  K$):**
+* **Sensitivity:**
 
 $$
-\mu_{\beta,k} \sim \mathcal{N}(\text{preset mean},\, \text{preset sd}), \qquad \sigma_{\beta,k} \sim \text{HalfNormal}(0.20), \qquad \beta_{kb} = \mu_{\beta,k} + \sigma_{\beta,k} z_{\beta,kb}
+\tilde\mu_k \sim \mathcal{N}(\text{preset mean},\, \text{preset sd}),\ \ \mu_{\beta,k} = \tilde\mu_k - \overline{\tilde\mu}, \qquad \sigma_{\beta,k} \sim \text{HalfNormal}(0.20), \qquad \beta_{kb} = \mu_{\beta,k} + \sigma_{\beta,k} z_{\beta,kb}
 $$
 
-The `data` preset is mean 0.3, sd 0.30 (GRN sd 0.35); the `uniform` preset is mean 1.0, sd 0.15. Override any party with `beta_priors={"ALP": (mean, sd)}`. The reference party has no beta, so it has no prior. This is the only way to set beta priors.
+The prior is on the pre-centring $\tilde\mu_k$. The `data` preset is mean 0.3, sd 0.30 (GRN 0.3, sd 0.35); the `uniform` preset is mean 1.0, sd 0.15. Override any non-reference party with `beta_priors={"ALP": (mean, sd)}`. The reference party has no table entry: its $\tilde\mu_K$ has mean minus the sum of the others' means (so the means sum to zero and centring leaves the stated means unchanged) and the average of their sds. This is the only way to set beta priors.
 
-* **Intercepts:** $m_k \sim \mathcal{N}(m_{0,k},\thinspace  1)$, where $m_{0,k}$ is the empirical log-ratio of party $k$ to the reference.
+* **Intercepts:** $\tilde m_k \sim \mathcal{N}(m_{0,k},\ 1.5)$ (`m_prior_sd`), $m_k = \tilde m_k - \overline{\tilde m}$, where $m_{0,k}$ is the mean log share of party $k$ over booth-elections, centred to sum to zero.
 
 * **Booth offsets and noise:** $\alpha_{kb} = \sigma_{\alpha,k} z, \quad \varepsilon_{kbt} = \sigma_{\varepsilon,k} z$ with $\sigma_{\alpha,k} \sim \text{HalfNormal}(0.25/\sqrt{2})$ and $\sigma_{\varepsilon,k} \sim \text{HalfNormal}(s_\varepsilon/\sqrt{2})$.
 
@@ -358,7 +364,7 @@ $$
 * **Why we do it:** It turns the abstract shifts into explicit party probabilities that sum to 100% at every booth in every draw.
 
 $$
-\eta_{kb} = m_k + \alpha_{kb} + \text{lin}_{kb} + \sigma_{\varepsilon,k} z_\varepsilon, \qquad \boldsymbol{p}_b = \text{softmax}(\boldsymbol{\eta}_b)
+\tilde\eta_{kb} = m_k + \alpha_{kb} + \text{lin}_{kb} + \sigma_{\varepsilon,k} z_\varepsilon, \qquad \boldsymbol{p}_b = \text{softmax}\big(3.5\tanh(\tilde{\boldsymbol{\eta}}_b/3.5)\big)
 $$
 
 ### 5. Turnout & Volumes
@@ -395,11 +401,17 @@ $$
 p'_{kb} = (1 - f_k)\,p_{kb}, \qquad p'_{\text{ONP},b} = \sum_{k} f_k\,p_{kb}
 $$
 
-* **Entry layer** (`onp_mode="entry"`):
+* **Entry layer** (`onp_mode="entry"`): a seat ONP share $s$ from the statewide poll, taken from the parties in proportion to Dirichlet-drawn siphon weights $w_k$:
 
 $$
-s = \text{clip}\left(\frac{\kappa_{\text{ONP}}\, S_{\text{ONP}}}{100},\ 0,\ s_{\max}\right), \qquad p'_{kb} = (1-s)\,p_{kb}, \qquad p'_{\text{ONP},b} = s
+s = \text{clip}\left(\kappa\, \tfrac{S_{\text{ONP}}}{100},\ 0,\ s_{\max}\right),\ \ \ln\kappa \sim \mathcal{N}(\ln 0.65,\ 0.5^2), \qquad \boldsymbol{w} \sim \text{Dirichlet}(c\,\boldsymbol{w}^0)
 $$
+
+$$
+s_b = \min\!\Big(s\,\tfrac{\pi_b}{\bar\pi},\ 0.5\Big),\ \ \pi_b = \textstyle\sum_k w_k p_{kb}, \qquad p'_{kb} = p_{kb} - s_b\,\tfrac{w_k p_{kb}}{\pi_b}, \qquad p'_{\text{ONP},b} = s_b
+$$
+
+$\boldsymbol{w}^0$ is fixed in `onp.py` (LNP 0.50, ALP 0.35, OTHER 0.12, GRN 0.03, any other party 0.10, then normalised); it is not a config setting. $c$ is `opv_flow_conc` (133 if `None`), so that setting also drives ONP siphon uncertainty. $\bar\pi$ is the plain mean over booths, so the volume-weighted seat share is only approximately $s$. The median 0.65, sd 0.5 and $s_{\max}$ are `onp_seat_ratio_median`, `onp_seat_ratio_sdlog`, `onp_max_seat_share`.
 
 ### 7. Final Aggregation
 
@@ -408,6 +420,31 @@ $$
 $$
 s_k = \frac{\sum_b V_b \, p'_{kb}}{\sum_b V_b}
 $$
+
+
+### 8. OPV (optional, `run_opv`)
+
+* **What it does:** Per draw, picks the two finalists, distributes every other party's votes by preference-flow rates, and returns two-candidate-preferred (2CP) shares, exhaustion and the winner.
+
+* **Why we do it:** NSW seats are decided on preferences, not primaries.
+
+* **Finalists $f, g$:** the two parties with the highest seat-wide primary $s_k$ in that draw, excluding `opv_finalist_exclude` (default `OTHER`). Pairings can differ between draws.
+
+* **Flows:** `opv_flows` is pair-keyed, e.g. `{"ALP_vs_LNP": {"GRN": [to ALP, to LNP, exhausted], "OTHER": [...]}}` (a reversed key also works). `None` uses `data.NSW_PREF_FLOWS` (Antony Green's 2019 tables; not verified for any seat). A party with no row uses the table's `OTHER` row, and with neither the run fails before sampling. A pairing with no table is not modelled: its draws are reported as `unmodelled`.
+
+$$
+A_b = v_{fb} + \textstyle\sum_{k} r_{k \to f}\, v_{kb}, \qquad B_b = v_{gb} + \sum_{k} r_{k \to g}\, v_{kb}, \qquad E_b = \sum_{k} r_{k \to \text{exh}}\, v_{kb}, \qquad v_{kb} = V_b\, p'_{kb}
+$$
+
+$$
+\text{2CP}_f = \frac{\sum_b A_b}{\sum_b (A_b + B_b)}, \qquad \text{exhausted} = \frac{\sum_b E_b}{\sum_b V_b}, \qquad \text{winner} = f \text{ if } \text{2CP}_f > 50\%
+$$
+
+The rates $r$ are one seat-wide vector per draw (same for every booth): fixed if `opv_flow_conc=None`, otherwise $\text{Dirichlet}(c \cdot \text{rates})$ with $c$ = `opv_flow_conc` (default 133; zero rates floored at 0.001).
+
+* **Reporting:** `win_probs` and `pair_probs` use all draws. Booth tables and figures are conditional on the most frequent modelled pairing (`party` listed first) and warn if it occurs in under `opv_min_pair_prob` (0.9) of draws. 2CP % is of continuing votes; exhaustion is of all formal votes.
+
+* **Code:** `opv.compute_opv` has its own random stream (`seed` + 202), so it never changes the primary-vote draws, and a failure there is a warning, not a lost forecast. Its trace signals (`s8_*`) are optional in `check_trace`.
 
 
 ## Known Limitations
@@ -426,6 +463,12 @@ Things the model does not do, or does only weakly. None are bugs; they bound wha
 
 * **Random effects on the reference party.** `alpha`, `d` and `eps` are drawn for every party including the reference, so the noise on a log-ratio against `OTHER` includes `OTHER`'s own noise. Fixing the reference party's effects at 0 is the standard parameterisation and would remove a redundant degree of freedom; it changes the model, so it has not been done.
 
-* **The reference party matters.** Setting $\beta_K = 0$ for `OTHER` makes the model depend on which party is last in `parties`.
+* **The reference party matters.** Its beta prior is built from the other parties' (Step 1), so the model depends on which party is last in `parties`.
+
+* **The tanh cap is not shift-invariant.** It bounds each logit at $\pm 3.5$ elementwise, so adding a constant to every logit no longer leaves the shares unchanged; with unconstrained $\alpha$, $d$, $\varepsilon$ this interacts with identifiability.
+
+* **ONP entry and the booth tables.** `booth_forecast`, `booth_draws_df` and the uncertainty attribution still scale the target party by the flat $(1-s)$ (`target_scale`), not by the Step 6 booth-level siphon. The seat shares, booth party draws and OPV use the siphon.
+
+* **OPV is a simplified count.** Finalists are the top two on primaries (an independent inside `OTHER` can never be a finalist; ONP is eligible only if a flow table names it), flows are seat-wide, and the flow tables have not been checked against real 2CP results (there is no OPV backtest).
 
 * **Endogenous Volume-Share Linkage.** Volume $\boldsymbol{V}$ and share $\boldsymbol{p}_b$ are sampled independently, ignoring potential joint effects where polarization simultaneously alters turnout and vote choice.
