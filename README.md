@@ -79,7 +79,7 @@ As should be somewhat self evident, the program produces all the probability dis
 
 Each run also saves `inputs_resolved.json` (every setting actually used) and, with `record_trace` on, a `trace.npz` holding the signal at each step above.
 
-# Cool New Plots (OPV!)
+# V3.3 Cool New Plots (OPV!)
 
 Hi I forgot to add opv to this readme but it generates cool images!
 
