@@ -123,6 +123,9 @@ class ModelConfig:
     opv_flow_conc: Optional[float] = 133.0                      # None: flow rates fixed; a number: each draw's rates ~ Dirichlet(conc * rates) (smaller = more flow uncertainty)
     opv_finalist_exclude: Sequence[str] = ("OTHER",)           # catch-all buckets that cannot be a finalist
     opv_min_pair_prob: float = 0.9                             # warn when the reported finalist pairing occurs in fewer draws than this
+    opv_affinity_sd: float = 1.5                               # sd (log-odds vs exhausting) of any source->candidate preference affinity no flow table pins down; also the minimum sd for entrants
+    opv_entrants: Sequence[str] = ("ONP",)                    # parties whose voters' preference behaviour is not known: their affinities are never tighter than opv_affinity_sd
+    opv_proxies: Optional[Dict[str, Dict[str, float]]] = None  # {"ONP": {"LNP": 0.7, "OTHER": 0.3}}: an unknown affinity takes the weighted average of these parties' affinities as its mean
 
 
 BRIAN_DEFAULT: Dict[str, float] = {"LNP": 0.20, "ALP": 0.05}
@@ -269,6 +272,11 @@ def validate(cfg: ModelConfig, run: RunOptions) -> List[str]:
         err.append("opv_flow_conc must be > 0 (or None for fixed flows).")
     if not 0.0 <= float(cfg.opv_min_pair_prob) <= 1.0:
         err.append("opv_min_pair_prob must be between 0 and 1.")
+    if not float(cfg.opv_affinity_sd) > 0.0:
+        err.append("opv_affinity_sd must be > 0.")
+    for e, d in (cfg.opv_proxies or {}).items():
+        if not isinstance(d, dict) or not d or any(float(w) <= 0.0 for w in d.values()):
+            err.append(f"opv_proxies[{e!r}] must be a non-empty {{party: positive weight}} dict.")
     if run.backtest_state_mode not in BACKTEST_STATE_MODES:
         err.append(f"backtest_state_mode must be one of {BACKTEST_STATE_MODES}.")
     if run.backtest_volume_mode not in BACKTEST_VOLUME_MODES:

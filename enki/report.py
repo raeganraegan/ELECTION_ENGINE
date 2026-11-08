@@ -25,10 +25,9 @@ def print_run_report(y, cfg: ModelConfig) -> None:
         a, b = o.report_pair
         sd = o.seat_draws
         sub = sd[sd["pair"].isin([f"{a} v {b}", f"{b} v {a}"])]
-        print("\nOPV COUNT (finalists = top two seat-wide primaries per draw, OTHER excluded)")
+        print("\nOPV COUNT (count-by-count finalists per draw; flows from the affinity model)")
         print("  P(finalist pairing):  " + ", ".join(f"{k} {100 * v:.1f}%" for k, v in o.pair_probs.items()))
-        print("  P(wins the seat):     " + ", ".join(f"{k} {100 * v:.1f}%" for k, v in o.win_probs.items())
-              + (f", unmodelled pairing {100 * o.unmodelled_prob:.1f}%" if o.unmodelled_prob > 0 else ""))
+        print("  P(wins the seat):     " + ", ".join(f"{k} {100 * v:.1f}%" for k, v in o.win_probs.items()))
         q = np.nanpercentile(sub[f"{a}_2CP_pct"], [5, 50, 95])
         print(f"  {a} 2CP % given {a} v {b}: mean {sub[f'{a}_2CP_pct'].mean():.2f}, p05 {q[0]:.2f}, p50 {q[1]:.2f}, p95 {q[2]:.2f}"
               f" | exhausted {sub['exhausted_pct_formal'].mean():.2f}% of formal votes"

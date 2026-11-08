@@ -34,7 +34,7 @@ Dependencies point one way only (no cycles); `plots.py` is a leaf that imports n
 | `enki/share_model.py` | Steps 0, 1, 3, 4: the PyMC fit and `simulate_shares`. |
 | `enki/volume_model.py` | Step 5: booth volumes (projected / electors / fitted). |
 | `enki/onp.py` | Step 6: One Nation (`none` / `brian` / `entry`). |
-| `enki/opv.py` | Step 8: OPV count (finalists, preference flows, 2CP, exhaustion). |
+| `enki/opv.py` | Step 8: OPV count (affinity-based preference flows, count-by-count finalists, 2CP, exhaustion). |
 | `enki/pipeline.py` | Step registry, `build_trace`, `check_trace`. |
 | `enki/forecast.py` | Runs the steps once, builds result tables and uncertainty attribution. |
 | `enki/backtest.py` | Walk-forward validation and scoring (coverage, CRPS, baselines). Depends on the model, never the reverse. |
@@ -83,7 +83,7 @@ Each run also saves `inputs_resolved.json` (every setting actually used) and, wi
 
 # OPV Outputs
 
-Written to `<output_root>/<seat>/<date>/ENKI/opv/` (figures need `make_plots`): `booth_2cp.csv`, `seat_2cp_draws.csv`, `finalist_pair_probs.csv`, `win_probs.csv`, and five figures: `booth_raw_first_preference_breakdown.png`, `booth_2cp_exhausted_breakdown.png`, `booth_2cp_uncertainty_forest.png`, `exhausted_vs_support_scatter.png`, `seat_outcome_distribution.png`.
+Written to `<output_root>/<seat>/<date>/ENKI/opv/` (figures need `make_plots`): `booth_2cp.csv`, `seat_2cp_draws.csv`, `finalist_pair_probs.csv`, `win_probs.csv`, `affinities.csv`, and five figures: `booth_raw_first_preference_breakdown.png`, `booth_2cp_exhausted_breakdown.png`, `booth_2cp_uncertainty_forest.png`, `exhausted_vs_support_scatter.png`, `seat_outcome_distribution.png`.
 
 ![image4](/Showcase/opv1.png)
 ![image4](/Showcase/opv2.png)
@@ -424,13 +424,23 @@ $$
 
 ### 8. OPV (optional, `run_opv`)
 
-* **What it does:** Per draw, picks the two finalists, distributes every other party's votes by preference-flow rates, and returns two-candidate-preferred (2CP) shares, exhaustion and the winner.
+* **What it does:** Per draw, runs a count to find the two finalists, splits every other party's votes by preference flows, and returns two-candidate-preferred (2CP) shares, exhaustion and the winner.
 
 * **Why we do it:** NSW seats are decided on preferences, not primaries.
 
-* **Finalists $f, g$:** the two parties with the highest seat-wide primary $s_k$ in that draw, excluding `opv_finalist_exclude` (default `OTHER`). Pairings can differ between draws.
+* **Flows (affinity model):** A source party $s$ sends its votes to the continuing candidates $C$ by a softmax with exhausting as the reference:
 
-* **Flows:** `opv_flows` is pair-keyed, e.g. `{"ALP_vs_LNP": {"GRN": [to ALP, to LNP, exhausted], "OTHER": [...]}}` (a reversed key also works). `None` uses `data.NSW_PREF_FLOWS` (Antony Green's 2019 tables; not verified for any seat). A party with no row uses the table's `OTHER` row, and with neither the run fails before sampling. A pairing with no table is not modelled: its draws are reported as `unmodelled`.
+$$
+r_{s \to c} = \frac{e^{u_{sc}}}{1 + \sum_{c' \in C} e^{u_{sc'}}}, \qquad r_{s \to \text{exh}} = \frac{1}{1 + \sum_{c' \in C} e^{u_{sc'}}}
+$$
+
+Flow tables (`opv_flows`, e.g. `{"ALP_vs_LNP": {"GRN": [to ALP, to LNP, exhausted]}}`; reversed keys work and rows may be missing) are data: a row gives $u_{sc} = \ln(p_c / p_{\text{exh}})$. When the final pair has a table its own rows are used exactly; otherwise the affinities pooled over all tables are. `None` uses `data.NSW_PREF_FLOWS` (Antony Green's 2019 tables; not verified for any seat). Each draw samples one affinity matrix $u = \mu + \sigma z$, shared by all its steps.
+
+* **Unknown flows:** An affinity no table pins down has mean equal to the source's average known affinity (0 if the source is in no table), or the weighted mean of its `opv_proxies` (e.g. `{"ONP": {"LNP": 0.7, "OTHER": 0.3}}`), and sd `opv_affinity_sd` (1.5 log-odds). Parties in `opv_entrants` (default `("ONP",)`) never get an sd below that, even where a table exists. Known entries get noise from `opv_flow_conc` (default 133; `None` = fixed). No draw is ever dropped: unknown flows widen the band instead. `affinities.csv` lists every affinity and where it came from.
+
+* **Finalists $f, g$:** a count on seat totals. Buckets in `opv_finalist_exclude` (default `OTHER`) are distributed first, then the eligible party with the fewest votes is excluded and distributed, until two remain. Pairings can differ between draws.
+
+* **Tallies:** for the finalist pair, every other party's original primary votes are split by that pair's rates:
 
 $$
 A_b = v_{fb} + \textstyle\sum_{k} r_{k \to f}\, v_{kb}, \qquad B_b = v_{gb} + \sum_{k} r_{k \to g}\, v_{kb}, \qquad E_b = \sum_{k} r_{k \to \text{exh}}\, v_{kb}, \qquad v_{kb} = V_b\, p'_{kb}
@@ -440,9 +450,7 @@ $$
 \text{2CP}_f = \frac{\sum_b A_b}{\sum_b (A_b + B_b)}, \qquad \text{exhausted} = \frac{\sum_b E_b}{\sum_b V_b}, \qquad \text{winner} = f \text{ if } \text{2CP}_f > 50\%
 $$
 
-The rates $r$ are one seat-wide vector per draw (same for every booth): fixed if `opv_flow_conc=None`, otherwise $\text{Dirichlet}(c \cdot \text{rates})$ with $c$ = `opv_flow_conc` (default 133; zero rates floored at 0.001).
-
-* **Reporting:** `win_probs` and `pair_probs` use all draws. Booth tables and figures are conditional on the most frequent modelled pairing (`party` listed first) and warn if it occurs in under `opv_min_pair_prob` (0.9) of draws. 2CP % is of continuing votes; exhaustion is of all formal votes.
+* **Reporting:** `win_probs` and `pair_probs` use all draws and sum to 1. Booth tables and figures are conditional on the most frequent pairing (`party` listed first) and warn if it occurs in under `opv_min_pair_prob` (0.9) of draws. 2CP % is of continuing votes; exhaustion is of all formal votes.
 
 * **Code:** `opv.compute_opv` has its own random stream (`seed` + 202), so it never changes the primary-vote draws, and a failure there is a warning, not a lost forecast. Its trace signals (`s8_*`) are optional in `check_trace`.
 
@@ -469,6 +477,6 @@ Things the model does not do, or does only weakly. None are bugs; they bound wha
 
 * **ONP entry and the booth tables.** `booth_forecast`, `booth_draws_df` and the uncertainty attribution still scale the target party by the flat $(1-s)$ (`target_scale`), not by the Step 6 booth-level siphon. The seat shares, booth party draws and OPV use the siphon.
 
-* **OPV is a simplified count.** Finalists are the top two on primaries (an independent inside `OTHER` can never be a finalist; ONP is eligible only if a flow table names it), flows are seat-wide, and the flow tables have not been checked against real 2CP results (there is no OPV backtest).
+* **OPV is a simplified count.** Flows are seat-wide and assume IIA (a source's relative preference between two candidates ignores who else runs); table rows are net flows to the final pair but are also reused as direct affinities in the exclusion steps; an independent inside `OTHER` can never be a finalist; a source that appears in no table (ALP with the default tables) starts from a neutral prior; and nothing has been checked against real 2CP results (there is no OPV backtest).
 
 * **Endogenous Volume-Share Linkage.** Volume $\boldsymbol{V}$ and share $\boldsymbol{p}_b$ are sampled independently, ignoring potential joint effects where polarization simultaneously alters turnout and vote choice.

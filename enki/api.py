@@ -29,7 +29,7 @@ from .report import print_run_report
 
 log = logging.getLogger("enki")
 _DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year", "backtest_polls", "election_dates")
-_TUPLE_FIELDS = ("parties", "opv_finalist_exclude", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
+_TUPLE_FIELDS = ("parties", "opv_finalist_exclude", "opv_entrants", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
 
 
 @dataclass
@@ -188,7 +188,8 @@ def _write_opv(y: ENKIOutput, res: Forecast, run: RunOptions, out: Path) -> None
     d = out / "opv"
     d.mkdir(parents=True, exist_ok=True)
     for name, table, idx in (("booth_2cp", o.booth_2cp, False), ("seat_2cp_draws", o.seat_draws, False),
-                             ("finalist_pair_probs", o.pair_probs, True), ("win_probs", o.win_probs, True)):
+                             ("finalist_pair_probs", o.pair_probs, True), ("win_probs", o.win_probs, True),
+                             ("affinities", o.affinities, False)):
         table.to_csv(d / f"{name}.csv", index=idx)
         y.files[f"opv_{name}"] = str(d / f"{name}.csv")
     if run.make_plots:

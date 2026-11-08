@@ -1,20 +1,32 @@
 """opv.py -- Step 8. Optional preferential (OPV) count: finalists, preference flows, two-candidate-preferred (2CP) and exhaustion.
 
+Flows come from an AFFINITY model, so any finalist pairing can be counted, including ones with no flow table:
+
+    a source party s sends its votes to the continuing candidates C with softmax over  {exhaust: 0} U {u_sc : c in C}
+    u_sc = log-affinity of s's voters for candidate c, relative to exhausting      (IIA: removing a candidate re-spreads its share)
+
+  * Flow tables (opv_flows) are DATA: a row [to a, to b, exhausted] gives u_sa = ln(p_a/p_exh), u_sb = ln(p_b/p_exh). When the final
+    pair has a table, its own rows are used as given; otherwise the affinities pooled over all tables are used.
+  * An affinity no table pins down (e.g. anything about a new entrant) gets a prior: mean = the source's average known affinity
+    (or the weighted average of its `opv_proxies`), sd = opv_affinity_sd. Parties in `opv_entrants` always get at least that sd,
+    even where a table exists, because their voters' behaviour is not known.
+  * Each draw samples one affinity matrix (u = mu + sd * z) used throughout that draw, so flow ignorance widens the seat band
+    rather than removing draws. Known entries use opv_flow_conc for their noise (None = fixed).
+
 For every posterior draw:
-  1. The finalists are the two parties with the highest SEAT-WIDE primary share in that draw (catch-all buckets such as
-     OTHER cannot be a finalist). Different draws can have different pairings.
-  2. Each other party's primary votes in every booth are split by that pairing's flow rates
-     [to finalist 1, to finalist 2, exhausted]. Rates are fixed, or (opv_flow_conc) redrawn per draw from a Dirichlet.
-  3. 2CP % = finalist votes / (finalist 1 + finalist 2 votes); exhausted votes leave the count. The seat is won by the
-     finalist with more than 50% of the 2CP.
+  1. Count-by-count finalists. Buckets in opv_finalist_exclude (default OTHER) are distributed first, then the eligible party with
+     the fewest seat-wide votes is excluded and distributed, until two remain. (Flows are seat-wide, so this runs on seat totals.)
+  2. Final tallies for the finalist pair (f, g): every other party's ORIGINAL primary votes in every booth are split by that pair's
+     [to f, to g, exhausted] rates, so a known pair reproduces its table exactly.
+  3. 2CP % = f / (f + g); the winner has more than 50%; exhausted votes leave the count.
 
 Reads only arrays (volumes V and booth primaries P in percent); it knows nothing about fitting, polls or files.
 
 Limitations (deliberate simplifications, not bugs):
-  * Finalists are the top two on primaries. The real count excludes candidates one at a time, and OTHER is one bucket, so
-    an independent finishing in the final two is invisible here.
-  * Flow rates are seat-wide: they vary between draws (if opv_flow_conc is set) but not between booths.
-  * A pairing with no flow table is NOT modelled: its draws get NaN 2CP and are reported as `unmodelled`.
+  * IIA: a source's relative preference between two candidates does not depend on who else is running (exhaustion does rise as
+    candidates drop out). Table rows are net flows to the final pair and are reused as direct affinities in the exclusion steps.
+  * Flow rates are seat-wide (shared by all booths); independents inside a bucket such as OTHER cannot be finalists.
+  * Noise on affinities is independent per (source, candidate), so it ignores correlation within a table row.
 """
 from __future__ import annotations
 
@@ -32,21 +44,22 @@ from .data import NSW_PREF_FLOWS
 
 log = logging.getLogger("enki")
 OPV_SEED_OFFSET = 202
-FLOW_FLOOR = 1e-3                      # Dirichlet needs positive parameters: a rate of exactly 0 is floored at this
+FLOW_FLOOR = 1e-3                      # rates of exactly 0 are floored at this before taking logs
+SELF_AFFINITY = 0.0                    # log-affinity of a party's voters for a "like" party when a proxy names the party itself
 _PAIR_KEY = re.compile(r"^\s*([A-Za-z0-9]+)_vs_([A-Za-z0-9]+)\s*$")
 
 
 @dataclass
 class OpvResult:
     eligible: List[str]                  # parties that can be a finalist
-    report_pair: Tuple[str, str]         # (A, B): the most frequent modelled pairing; booth tables and plots are for it
+    report_pair: Tuple[str, str]         # (A, B): the most frequent pairing; booth tables and plots are for it
     report_pair_prob: float              # fraction of ALL draws with that pairing
-    pair_probs: pd.Series                # "ALP v LNP" -> fraction of draws (includes unmodelled pairings)
-    win_probs: pd.Series                 # party -> fraction of ALL draws it wins the seat; with unmodelled_prob these sum to 1
-    unmodelled_prob: float               # fraction of draws whose pairing has no flow table
+    pair_probs: pd.Series                # "ALP v LNP" -> fraction of draws
+    win_probs: pd.Series                 # party -> fraction of draws it wins the seat (sums to 1)
     seat_draws: pd.DataFrame             # one row per draw: pair, <party>_2CP_pct (NaN if not a finalist), exhausted, winner
     booth_2cp: pd.DataFrame              # per booth, over the draws that have the reported pairing
     booth_primary_mean: pd.DataFrame     # booth x party mean primary % over all draws
+    affinities: pd.DataFrame             # pooled source -> candidate log-affinities, sd and where each came from
     flow_conc: Optional[float] = None
     warnings: List[str] = field(default_factory=list)
 
@@ -89,44 +102,146 @@ def _parse_flows(flows: Dict[str, Any]) -> Dict[Tuple[str, str], Dict[str, List[
     return out
 
 
-def _lookup(parsed, a: str, b: str) -> Optional[Dict[str, List[float]]]:
-    """Rows of the a-v-b table oriented [to a, to b, exhausted]; None when neither a_vs_b nor b_vs_a exists."""
-    if (a, b) in parsed:
-        return parsed[(a, b)]
-    if (b, a) in parsed:
-        return {k: [v[1], v[0], v[2]] for k, v in parsed[(b, a)].items()}
-    return None
-
-
 def check_flows(flows: Dict[str, Any], cfg: ModelConfig) -> List[str]:
-    """Input check, run before any sampling. Hard problems raise; soft ones come back as warnings."""
+    """Input check, run before any sampling. Malformed tables raise; everything else comes back as warnings.
+    Missing rows or missing tables are NOT errors: the affinity model fills them from its wide prior."""
     parsed = _parse_flows(flows)
     names = out_party_names(cfg)
     excl = {e.upper() for e in cfg.opv_finalist_exclude}
     eligible = [n for n in names if n not in excl]
-    errs, warn = [], []
-    usable = 0
-    for (a, b), rows in parsed.items():
+    warn, usable = [], 0
+    for (a, b) in parsed:
         bad = [x for x in (a, b) if x not in eligible]
         if bad:
-            warn.append(f"OPV flow table {a}_vs_{b} is ignored: {bad} cannot be a finalist (not modelled, or excluded).")
-            continue
-        usable += 1
-        missing = [n for n in names if n not in (a, b) and n not in rows and "OTHER" not in rows]
-        if missing:
-            errs.append(f"{a}_vs_{b} has no flow row for {missing} and no 'OTHER' row to fall back on")
-    if errs:
-        raise ValueError("opv_flows: " + "; ".join(errs))
+            warn.append(f"OPV flow table {a}_vs_{b} is not used as a pairing: {bad} cannot be a finalist (not modelled, or excluded); "
+                        "its rows still inform the affinities of the parties that are modelled.")
+        else:
+            usable += 1
     if not usable:
-        warn.append("No OPV flow table matches any possible finalist pair of the modelled parties: the OPV step will have nothing to report.")
+        warn.append("No OPV flow table matches a possible finalist pair of the modelled parties: flows come from the affinity prior "
+                    f"(sd {cfg.opv_affinity_sd:g}) wherever no table row exists.")
+    for e, d in (cfg.opv_proxies or {}).items():
+        unknown = [p for p in list(d) + [e] if str(p).upper() not in names]
+        if unknown:
+            warn.append(f"opv_proxies[{e!r}] names {unknown}, which are not modelled parties; they are ignored.")
     return warn
 
 
-def _rates(rates: Sequence[float], conc: Optional[float], n: int, rng: np.random.Generator) -> np.ndarray:
-    r = np.asarray(rates, dtype=float)
-    if conc is None:
-        return np.broadcast_to(r, (n, 3))
-    return rng.dirichlet(np.maximum(r, FLOW_FLOOR) * float(conc), size=n)
+# ----------------------------------------------------------------------------- the affinity model
+def _trigamma(x):
+    """psi'(x) for x > 0 (recurrence up to x >= 6, then the asymptotic series); avoids a SciPy dependency."""
+    x = np.asarray(x, dtype=float)
+    out = np.zeros_like(x)
+    for _ in range(8):
+        small = x < 6.0
+        out = out + np.where(small, 1.0 / x ** 2, 0.0)
+        x = np.where(small, x + 1.0, x)
+    return out + 1.0 / x + 1.0 / (2 * x ** 2) + 1.0 / (6 * x ** 3) - 1.0 / (30 * x ** 5)
+
+
+def _softmax_exh(U: np.ndarray) -> np.ndarray:
+    """(n, m) log-affinities of m candidates relative to exhausting -> (n, m + 1) flow rates; column 0 is exhausted."""
+    L = np.concatenate([np.zeros((U.shape[0], 1)), U], axis=1)
+    L = L - L.max(axis=1, keepdims=True)
+    E = np.exp(L)
+    return E / E.sum(axis=1, keepdims=True)
+
+
+@dataclass
+class AffinityModel:
+    names: List[str]
+    mu: np.ndarray                       # (K, K) pooled mean log-affinity, row = source, column = candidate
+    sd: np.ndarray                       # (K, K) pooled sd
+    basis: np.ndarray                    # (K, K) object: where each entry came from
+    tables: Dict[Tuple[int, int], Dict[int, Tuple[float, float, float, float]]]   # (lo, hi) -> source -> (mu_lo, sd_lo, mu_hi, sd_hi)
+
+
+def build_affinity(parsed: Dict[Tuple[str, str], Dict[str, List[float]]], names: Sequence[str], cfg: ModelConfig) -> AffinityModel:
+    names = list(names)
+    K, ix = len(names), {n: i for i, n in enumerate(names)}
+    conc = cfg.opv_flow_conc
+    wide = float(cfg.opv_affinity_sd)
+    ents = {str(e).upper() for e in cfg.opv_entrants}
+
+    est: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+    tables: Dict[Tuple[int, int], Dict[int, Tuple[float, float, float, float]]] = {}
+    for (a, b), rows in parsed.items():
+        if a not in ix or b not in ix:
+            continue
+        lo, hi = sorted((a, b))
+        il, ih = ix[lo], ix[hi]
+        for party, r in rows.items():
+            if party not in ix or party in (a, b):
+                continue
+            k = ix[party]
+            r = [r[1], r[0], r[2]] if a > b else list(r)                 # orient to (lo, hi)
+            p = np.maximum(np.asarray(r, dtype=float), FLOW_FLOOR)
+            u = (float(np.log(p[0] / p[2])), float(np.log(p[1] / p[2])))
+            s = (0.0, 0.0) if conc is None else tuple(float(np.sqrt(_trigamma(conc * p[q]) + _trigamma(conc * p[2]))) for q in (0, 1))
+            est.setdefault((k, il), []).append((u[0], s[0] ** 2))
+            est.setdefault((k, ih), []).append((u[1], s[1] ** 2))
+            sl = max(s[0], wide) if (party in ents or lo in ents) else s[0]
+            sh = max(s[1], wide) if (party in ents or hi in ents) else s[1]
+            tables.setdefault((il, ih), {})[k] = (u[0], sl, u[1], sh)
+
+    mu, sd = np.zeros((K, K)), np.zeros((K, K))
+    basis = np.full((K, K), "", dtype=object)
+    known = np.zeros((K, K), dtype=bool)
+    for (k, c), lst in est.items():                                       # pool every table that speaks about (source, candidate)
+        v = np.array([x[0] for x in lst])
+        var = float(np.mean([x[1] for x in lst])) + (float(v.var(ddof=1)) if len(v) > 1 else 0.0)
+        mu[k, c], sd[k, c], known[k, c], basis[k, c] = float(v.mean()), float(np.sqrt(var)), True, "table"
+        if names[k] in ents or names[c] in ents:
+            sd[k, c], basis[k, c] = max(sd[k, c], wide), "table (entrant, widened)"
+
+    base = np.array([float(mu[k][known[k]].mean()) if known[k].any() else 0.0 for k in range(K)])
+    for k in range(K):                                                    # nothing known about (k, c): the source's average, wide
+        for c in range(K):
+            if k != c and not known[k, c]:
+                mu[k, c], sd[k, c], basis[k, c] = base[k], wide, "default (source average)"
+
+    prox = {str(c).upper(): {str(p).upper(): float(w) for p, w in d.items() if str(p).upper() in ix and float(w) > 0}
+            for c, d in (cfg.opv_proxies or {}).items()}
+    mu0 = mu.copy()
+    m = lambda s_, c_: SELF_AFFINITY if s_ == c_ else mu0[s_, c_]
+    for k in range(K):
+        for c in range(K):
+            if k == c or known[k, c]:
+                continue
+            pc, pk = prox.get(names[c]) or {}, prox.get(names[k]) or {}
+            pc = {p: w for p, w in pc.items() if p != names[c]}
+            pk = {p: w for p, w in pk.items() if p != names[k]}
+            if pc:                                                        # candidate c "is like" the proxies
+                mu[k, c], basis[k, c] = sum(w * m(k, ix[p]) for p, w in pc.items()) / sum(pc.values()), "proxy"
+            elif pk:                                                      # source k "behaves like" the proxies
+                mu[k, c], basis[k, c] = sum(w * m(ix[p], c) for p, w in pk.items()) / sum(pk.values()), "proxy"
+    return AffinityModel(names, mu, sd, basis, tables)
+
+
+def _finalists(T: np.ndarray, u: np.ndarray, elig: np.ndarray, buckets: Sequence[int], K: int) -> np.ndarray:
+    """Count-by-count on seat totals T (D, K) with per-draw affinities u (D, K, K). Returns the two surviving party indices per draw."""
+    D = T.shape[0]
+    cur = T.copy()
+    alive = np.zeros((D, K), dtype=bool)
+    alive[:, elig] = True
+    if len(elig) > 2:
+        for s in buckets:                                                 # buckets (e.g. OTHER) go first, to every eligible candidate
+            r = _softmax_exh(u[:, s, :][:, elig])
+            cur[:, elig] += cur[:, [s]] * r[:, 1:]
+            cur[:, s] = 0.0
+        pw = 1 << np.arange(K)
+        for _ in range(len(elig) - 2):
+            e = np.where(alive, cur, np.inf).argmin(axis=1)               # lowest continuing candidate in each draw
+            code = e * (1 << K) + (alive * pw).sum(axis=1)
+            for cd in np.unique(code):
+                idx = np.flatnonzero(code == cd)
+                ei, mask = int(cd >> K), int(cd & ((1 << K) - 1))
+                cand = [c for c in range(K) if (mask >> c) & 1 and c != ei]
+                r = _softmax_exh(u[idx, ei, :][:, cand])
+                cur[np.ix_(idx, cand)] += cur[idx, ei][:, None] * r[:, 1:]
+                cur[idx, ei] = 0.0
+                alive[idx, ei] = False
+    return np.argsort(~alive, axis=1, kind="stable")[:, :2]
 
 
 # ----------------------------------------------------------------------------- the step
@@ -140,47 +255,45 @@ def compute_opv(V: np.ndarray, P: np.ndarray, parties: Sequence[str], booths: Se
     D, B, K = P.shape
     votes = V[:, :, None] * P / 100.0                                   # (D, B, K) primary votes
     tot = V.sum(axis=1)                                                 # (D,)
-    primary = votes.sum(axis=1) / tot[:, None] * 100.0                  # (D, K) seat-wide primary %
+    T = votes.sum(axis=1)                                               # (D, K) seat-wide primary votes
+    primary = T / tot[:, None] * 100.0
 
     excl = {e.upper() for e in cfg.opv_finalist_exclude}
     el = np.array([j for j, n in enumerate(names) if n not in excl])
+    buckets = [j for j, n in enumerate(names) if n in excl]
     if len(el) < 2:
         raise ValueError(f"Need at least two parties that can be finalists; modelled {names}, excluded {sorted(excl)}.")
 
-    # Finalists per draw: top two seat-wide primaries; the pair is stored in alphabetical order (ia < ib by name)
-    order = np.argsort(-primary[:, el], axis=1)[:, :2]
-    f1, f2 = el[order[:, 0]], el[order[:, 1]]
-    swap = nm[f1] > nm[f2]
+    model = build_affinity(parsed, names, cfg)
+    Z = rng.standard_normal((D, K, K))                                  # one affinity draw per posterior draw, shared by every step
+    u = model.mu[None] + model.sd[None] * Z
+
+    fin = _finalists(T, u, el, buckets, K)
+    f1, f2 = fin[:, 0], fin[:, 1]
+    swap = nm[f1] > nm[f2]                                              # pairs are stored alphabetically: ia < ib by name
     ia, ib = np.where(swap, f2, f1), np.where(swap, f1, f2)
     pair_ids = ia * K + ib
 
-    VA, VB, VE = (np.full((D, B), np.nan) for _ in range(3))             # votes to ia / to ib / exhausted; NaN = unmodelled draw
-    modelled = np.zeros(D, dtype=bool)
+    VA, VB, VE = (np.zeros((D, B)) for _ in range(3))                   # votes to ia / to ib / exhausted
     for pid in np.unique(pair_ids):
         i, j = divmod(int(pid), K)
         idx = np.flatnonzero(pair_ids == pid)
-        rows = _lookup(parsed, names[i], names[j])
-        if rows is None:
-            continue
+        ctx = model.tables.get((i, j), {})                              # this pair's own table rows, where it has them
         va, vb, ve = votes[idx, :, i].copy(), votes[idx, :, j].copy(), np.zeros((len(idx), B))
         for k in range(K):
             if k in (i, j):
                 continue
-            rk = rows.get(names[k], rows.get("OTHER"))
-            if rk is None:
-                raise ValueError(f"No flow row for {names[k]} in {names[i]} v {names[j]} and no 'OTHER' row.")
-            r = _rates(rk, cfg.opv_flow_conc, len(idx), rng)             # (n, 3) seat-wide rates for these draws
+            mi, si, mj, sj = ctx[k] if k in ctx else (model.mu[k, i], model.sd[k, i], model.mu[k, j], model.sd[k, j])
+            r = _softmax_exh(np.column_stack([mi + si * Z[idx, k, i], mj + sj * Z[idx, k, j]]))   # (n, 3): exhaust, to i, to j
             vk = votes[idx, :, k]
-            va += vk * r[:, 0:1]
-            vb += vk * r[:, 1:2]
-            ve += vk * r[:, 2:3]
+            ve += vk * r[:, 0:1]
+            va += vk * r[:, 1:2]
+            vb += vk * r[:, 2:3]
         VA[idx], VB[idx], VE[idx] = va, vb, ve
-        modelled[idx] = True
 
-    sa, sb, se = VA.sum(axis=1), VB.sum(axis=1), VE.sum(axis=1)         # NaN on unmodelled draws
-    with np.errstate(invalid="ignore", divide="ignore"):
-        pct_a = 100.0 * sa / (sa + sb)
-    winner = np.where(~modelled, "unmodelled", np.where(sa > sb, nm[ia], nm[ib]))
+    sa, sb, se = VA.sum(axis=1), VB.sum(axis=1), VE.sum(axis=1)
+    pct_a = 100.0 * sa / (sa + sb)
+    winner = np.where(sa > sb, nm[ia], nm[ib])
     pair_label = np.char.add(np.char.add(nm[ia], " v "), nm[ib])
 
     cols: Dict[str, Any] = {"pair": pair_label}
@@ -194,13 +307,9 @@ def compute_opv(V: np.ndarray, P: np.ndarray, parties: Sequence[str], booths: Se
 
     pair_probs = pd.Series(pair_label).value_counts(normalize=True).rename("probability")
     win_probs = pd.Series({names[e]: float((winner == names[e]).mean()) for e in el}, name="probability")
-    unmodelled = float((~modelled).mean())
-    if not modelled.any():
-        raise ValueError(f"No draw's finalist pair has a flow table (draws had: {sorted(set(pair_label))}; tables: "
-                         f"{sorted(f'{a}_vs_{b}' for a, b in parsed)}).")
 
-    # Reported pairing = most frequent modelled one; the preferred party (cfg.party) is listed first when it is in it
-    ids, cnt = np.unique(pair_ids[modelled], return_counts=True)
+    # Reported pairing = most frequent one; the preferred party (cfg.party) is listed first when it is in it
+    ids, cnt = np.unique(pair_ids, return_counts=True)
     pid = int(ids[np.argmax(cnt)])
     i, j = divmod(pid, K)
     pref = cfg.party.upper()
@@ -228,18 +337,23 @@ def compute_opv(V: np.ndarray, P: np.ndarray, parties: Sequence[str], booths: Se
             "exhausted_share_of_total_mean": (100.0 * ve / np.maximum(vt, 1.0)).mean(axis=0),
             "draws_in_pair": int(m.sum())})
 
+    aff = pd.DataFrame([{"source": names[k], "candidate": names[c], "log_affinity": model.mu[k, c], "sd": model.sd[k, c],
+                         "odds_vs_exhaust": float(np.exp(model.mu[k, c])), "basis": model.basis[k, c]}
+                        for k in range(K) for c in el if k != c])
+
     w: List[str] = []
     rp = float(pair_probs.get(f"{min(pa, pb)} v {max(pa, pb)}", 0.0))
     if rp < cfg.opv_min_pair_prob:
         w.append(f"OPV: the reported pairing {pa} v {pb} occurs in only {100 * rp:.1f}% of draws; booth tables and plots are conditional on it "
                  f"(pairing probabilities: {', '.join(f'{k} {100 * v:.1f}%' for k, v in pair_probs.head(4).items())}). Win probabilities use all draws.")
-    if unmodelled > 0:
-        bad = [k for k in pair_probs.index if _lookup(parsed, *k.split(" v ")) is None]
-        w.append(f"OPV: {100 * unmodelled:.1f}% of draws have a finalist pairing with no flow table ({', '.join(bad)}); they count towards no one's win probability.")
+    filled = aff[aff["basis"].isin(["default (source average)", "proxy"])]
+    if len(filled):
+        ex = ", ".join(f"{r.source}>{r.candidate}" for r in filled.head(6).itertuples())
+        w.append(f"OPV: {len(filled)} of {len(aff)} source>candidate preference affinities have no flow table behind them and use the prior "
+                 f"(sd {cfg.opv_affinity_sd:g} log-odds), e.g. {ex}{' ...' if len(filled) > 6 else ''}. See opv/affinities.csv.")
     return OpvResult(eligible=[names[e] for e in el], report_pair=(pa, pb), report_pair_prob=rp, pair_probs=pair_probs, win_probs=win_probs,
-                     unmodelled_prob=unmodelled, seat_draws=seat_draws, booth_2cp=booth,
-                     booth_primary_mean=pd.DataFrame(P.mean(axis=0), columns=names, index=list(booths)),
-                     flow_conc=cfg.opv_flow_conc, warnings=w)
+                     seat_draws=seat_draws, booth_2cp=booth, booth_primary_mean=pd.DataFrame(P.mean(axis=0), columns=names, index=list(booths)),
+                     affinities=aff, flow_conc=cfg.opv_flow_conc, warnings=w)
 
 
 def opv_trace(o: OpvResult) -> Dict[str, np.ndarray]:
