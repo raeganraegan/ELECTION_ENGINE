@@ -144,6 +144,8 @@ class RunOptions:
     backtest_volume_sims: int = 4000
     run_attribution: bool = True                               # which uncertainty layer drives the seat band
     run_opv: bool = True                                       # Step 8: OPV count (needs run_forecast)
+    make_pdf: bool = True                                      # Module 9 strategy PDF (needs run_opv, output_root and reportlab); a failure is a warning
+    pdf_tier_cuts: Sequence[float] = (0.40, 0.80)              # venue tiers: P(party wins the venue) below / above these = TOUGH / BASE FIREWALL, between = SWING
     output_root: Optional[str] = None
     make_plots: bool = True
     print_report: bool = True
@@ -272,6 +274,8 @@ def validate(cfg: ModelConfig, run: RunOptions) -> List[str]:
         err.append("opv_flow_conc must be > 0 (or None for fixed flows).")
     if not 0.0 <= float(cfg.opv_min_pair_prob) <= 1.0:
         err.append("opv_min_pair_prob must be between 0 and 1.")
+    if not (len(run.pdf_tier_cuts) == 2 and 0.0 < float(run.pdf_tier_cuts[0]) < float(run.pdf_tier_cuts[1]) < 1.0):
+        err.append("pdf_tier_cuts must be two increasing probabilities between 0 and 1, e.g. (0.40, 0.80).")
     if not float(cfg.opv_affinity_sd) > 0.0:
         err.append("opv_affinity_sd must be > 0.")
     for e, d in (cfg.opv_proxies or {}).items():

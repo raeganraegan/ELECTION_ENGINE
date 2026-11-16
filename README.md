@@ -1,6 +1,8 @@
 # ELECTION ENGINE
 
-This readme is a wip and is definitely not up to convention on how to write a readme, but you'll have to suck it up and just read whats going on.
+This readme is a WIP, subject to change, and is definitely loosely up to convention on how to write a readme, but oh well. **The pretty and relevant outputs are first after the metadata**, *and the project nitty grittys come after that*.
+
+---
 
 ## Project Metadata
 
@@ -20,7 +22,54 @@ Alec, aka [raeganraegan](https://github.com/raeganraegan) on github.
 
 It aims to predict the primary vote of an electorate seat by booth and aggregate that into boothwide data predicted for the seat. From this, the aim is to then simulate the OPV preference flows present within the NSW state election.
 
-Note, this has been tuned/calibrated to the upcoming [NSW state election](https://elections.nsw.gov.au/elections/state-elections/2027-nsw-state-election). I'm sure it can be tuned to other elections but that's for another version to implement. Aim is to get this version working before this election and to get actionable booth level data from the twofold prediction of this engine. A bold aim indeed.
+Note, this has been tuned/calibrated to the upcoming [NSW state election](https://elections.nsw.gov.au/elections/state-elections/2027-nsw-state-election). I'm sure it can be tuned to other elections but that's for another version to implement. Aim is to get this version working before this election and to get actionable booth level data from the twofold prediction of this engine. A bold aim for sure, *and the scope of this project just keeps getting larger as statistical caveat after statistical caveat is added to each step*.
+
+---
+# What does this output?
+
+Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
+
+![image1](/Showcase/image1.png)
+
+![image2](/Showcase/image2.png)
+
+![image3](/Showcase/image3.png)
+
+It also generates some tables on the backtesting so you can see how it performed in the past.
+
+![image4](/Showcase/image4.png)
+
+And a few excel sheets, and `npz` that are characteristic of the simulation as well.
+
+
+# OPV Outputs
+
+Written to `<output_root>/<seat>/<date>/ENKI/opv/`
+
+Generally cool stuff but a lot of the uncertainty is generated within this step. It's also hard as hell to assess where one nation is at - so thats left to the user to 'simulate' what percentage one nation is at. Do this analysis scenario by scenario (no one nation, EXTREME one nation, etc). It's a bit like subway here - it's on you how you make this sandwich (one nation).
+
+![image4](/Showcase/opv1.png)
+![image4](/Showcase/opv2.png)
+![image4](/Showcase/opv3.png)
+![image4](/Showcase/opv4.png)
+
+# Module 9: Strategy PDF
+
+Written to `<output_root>/<seat>/<date>/ENKI/report/<Seat>_strategy.pdf`, 
+
+Makes some cool stuff! **STILL WIP** don't take this as gospel just yet.
+
+Still working on this step since loose png's and such are kinda useless and instead I want coherent reports generated.
+
+![image4](/Showcase/pdfreport.png)
+
+---
+
+# Election Engine (`enki/`) Model Specifications
+
+This part of the document outlines the step-by-step mathematical model and equation pipeline for [ENKI Election Engine](/enki/). It starts with the assumptions and notation, gives the whole model in two equations, then walks through each step. Every step lists the function in `enki/` that does it, and says where the code does something the equations alone would not tell you.
+
+**Notation.** Parties are indexed $k = 1 \dots K$, with the **last party (default `OTHER`) as the reference category** ($k=K$). Booths are $b$, past elections are $t = 1 \dots T$, and $n$ is the number of election cycles between the last election and the target ($n=1$ for 2027). $i$ indexes a posterior draw.
 
 #### **Files:**
 
@@ -39,6 +88,7 @@ Dependencies point one way only (no cycles); `plots.py` is a leaf that imports n
 | `enki/forecast.py` | Runs the steps once, builds result tables and uncertainty attribution. |
 | `enki/backtest.py` | Walk-forward validation and scoring (coverage, CRPS, baselines). Depends on the model, never the reverse. |
 | `enki/plots.py`, `io.py`, `report.py` | Figures, files in/out, terminal report. |
+| `enki/module9.py` | Module 9: strategy PDF for one seat. Reads a finished run; needs `reportlab`. |
 | `enki/api.py` | `ENKI(x) -> y`, input resolution, CLI. |
 
 
@@ -57,44 +107,9 @@ y.opv               # OPV result: finalist pairings, P(win), 2CP, exhaustion (No
 y.config            # the fully resolved settings that were actually run
 ```
 
+***Note: I mainly run this from ```execeutor.py```, in which case you can just simply click executor and in vscode just click the play button/run if from main. You can set all the params and fancy stuff in executor.***
+
 Default MCMC settings (`draws=500, tune=500, chains=2, target_accept=0.95`) are reduced for testing; use 2000 / 2000 / 4 / 0.99 for a real run.
-
-Old keys give a precise error naming their replacement (`brian_mode` -> `onp_mode='brian'`, `onp_layer` -> `onp_mode='entry'`, `local_priors`/`beta_g`/... -> `beta_priors`).
-
-# What does this output?
-
-Other than the boring ah excel spreadsheets you can sift through after each generation, ENKI generates beautiful plots like such (example only):
-
-![image1](/Showcase/image1.png)
-
-![image2](/Showcase/image2.png)
-
-![image3](/Showcase/image3.png)
-
-It also generates some tables on the backtesting so you can see how it performed in the past.
-
-![image4](/Showcase/image4.png)
-
-And a few excel sheets, and `npz` that are characteristic of the simulation as well.
-
-As should be somewhat self evident, the program produces all the probability distributions for election volume, primary vote share by party, the electoral tide based on polling data, as well as other local parameters that are evident.
-
-Each run also saves `inputs_resolved.json` (every setting actually used) and, with `record_trace` on, a `trace.npz` holding the signal at each step above.
-
-# OPV Outputs
-
-Written to `<output_root>/<seat>/<date>/ENKI/opv/` (figures need `make_plots`): `booth_2cp.csv`, `seat_2cp_draws.csv`, `finalist_pair_probs.csv`, `win_probs.csv`, `affinities.csv`, and five figures: `booth_raw_first_preference_breakdown.png`, `booth_2cp_exhausted_breakdown.png`, `booth_2cp_uncertainty_forest.png`, `exhausted_vs_support_scatter.png`, `seat_outcome_distribution.png`.
-
-![image4](/Showcase/opv1.png)
-![image4](/Showcase/opv2.png)
-![image4](/Showcase/opv3.png)
-![image4](/Showcase/opv4.png)
-
-# Election Engine (`enki/`) Model Specifications
-
-This part of the document outlines the step-by-step mathematical model and equation pipeline for [ENKI Election Engine](/enki/). It starts with the assumptions and notation, gives the whole model in two equations, then walks through each step. Every step lists the function in `enki/` that does it, and says where the code does something the equations alone would not tell you.
-
-**Notation.** Parties are indexed $k = 1 \dots K$, with the **last party (default `OTHER`) as the reference category** ($k=K$). Booths are $b$, past elections are $t = 1 \dots T$, and $n$ is the number of election cycles between the last election and the target ($n=1$ for 2027). $i$ indexes a posterior draw.
 
 ## Core Assumptions
 

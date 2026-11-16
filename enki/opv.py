@@ -331,6 +331,7 @@ def compute_opv(V: np.ndarray, P: np.ndarray, parties: Sequence[str], booths: Se
         booth = pd.DataFrame({
             "booth": list(booths), "expected_formal_votes": vt.mean(axis=0),
             f"{pa}_2cp_votes_mean": va.mean(axis=0), f"{pb}_2cp_votes_mean": vb.mean(axis=0), "exhausted_votes_mean": ve.mean(axis=0),
+            f"{pa}_primary_votes_mean": votes[m][:, :, A].mean(axis=0), f"{pb}_primary_votes_mean": votes[m][:, :, Bq].mean(axis=0),
             f"{pa}_2cp_share_mean": np.nanmean(share, axis=0), f"{pa}_2cp_p05": np.nanpercentile(share, 5, axis=0),
             f"{pa}_2cp_p95": np.nanpercentile(share, 95, axis=0), f"{pb}_2cp_share_mean": 100.0 - np.nanmean(share, axis=0),
             f"{pa}_booth_win_prob": np.nanmean(np.where(np.isnan(share), np.nan, share > 50.0), axis=0),

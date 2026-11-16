@@ -29,7 +29,7 @@ from .report import print_run_report
 
 log = logging.getLogger("enki")
 _DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes", "target_year", "backtest_polls", "election_dates")
-_TUPLE_FIELDS = ("parties", "opv_finalist_exclude", "opv_entrants", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
+_TUPLE_FIELDS = ("parties", "opv_finalist_exclude", "opv_entrants", "pdf_tier_cuts", "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
 
 
 @dataclass
@@ -203,6 +203,12 @@ def _write_opv(y: ENKIOutput, res: Forecast, run: RunOptions, out: Path) -> None
             y.files[f"opv_{fname}"] = str(d / fname)
 
 
+def _write_pdf(y: ENKIOutput, cfg: ModelConfig, run: RunOptions, out: Path) -> None:
+    from .module9 import build_strategy_pdf
+    slug = "".join(ch if ch.isalnum() else "_" for ch in cfg.seat_name).strip("_") or "Seat"
+    y.files["strategy_pdf"] = str(build_strategy_pdf(y, cfg, out / "report" / f"{slug}_strategy.pdf", run.pdf_tier_cuts))
+
+
 def _write_forecast(y: ENKIOutput, res: Forecast, cfg: ModelConfig, run: RunOptions, out: Path, seat_folder: Path, sources: dict) -> None:
     if run.make_plots:
         figs = {
@@ -225,6 +231,8 @@ def _write_forecast(y: ENKIOutput, res: Forecast, cfg: ModelConfig, run: RunOpti
     append_history(res, seat_folder, cfg.prediction_date)
     if res.opv is not None:
         _write_opv(y, res, run, out)
+    if run.make_pdf and res.opv is not None:
+        _guarded(y, "strategy PDF", lambda: _write_pdf(y, cfg, run, out))
     y.files["forecast_dir"] = str(out)
 
 
