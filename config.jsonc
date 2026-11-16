@@ -1,0 +1,225 @@
+{
+  // Data keys (at least one of booth_results / polls required to run).
+  "booth_results": "data/sample_booth_results.csv",
+  // Path to booth-level results CSV. Required columns: year, booth, total_votes, informal_votes, plus one column per modelled party.
+  "polls": "data/sample_polls.csv",
+  // Path to statewide poll table. Needs date + one column per party (+ optional sample_size, ONP).
+  "state_results": "data/sample_state_results.csv",
+  // Path to statewide history CSV (year, election_date, + parties). Defaults to data/sample_state_results.csv if omitted.
+  "projected_formal_votes": null,
+  // Optional booth-level formal votes, used as-is if set. Overrides registered_electors.
+  "target_year": null,
+  // Target year for volume growth. Null = last election year + election_cycle_years.
+  "backtest_polls": null,
+  // Optional separate poll table for backtests. Defaults to the same table as polls.
+  "election_dates": null,
+  // Optional {year: date} override. Defaults to dates read from state_results CSV.
+
+  // ModelConfig fields — these change the numbers the model produces.
+  "seat_name": "sample",
+  // Name of the seat (used for output folder slug).
+  "party": "ALP",
+  // The party whose booth forecasts/tables are reported. Must be one of parties.
+  "parties": ["ALP", "LNP", "GRN", "OTHER"],
+  // Modelled jointly. LAST party is the reference category (fixed beta=0). Put OTHER last.
+  "election_date": "2027-03-13",
+  // Date of the target election (YYYY-MM-DD).
+  "prediction_date": null,
+  // Date of the prediction. Null = today. Used for poll time-horizon error.
+  "scenario_pct": [5, 50, 95],
+  // Three increasing percentiles (worst/average/best) for seat-wide scenario summaries.
+  "exclude_booths": ["NONE"],
+  // Booth names to drop before fitting.
+  "booth_merge": null,
+  // Optional {old_venue: new_venue}; booths merged BEFORE fitting.
+  "early_keywords": ["PRE-POLL", "PREPOLL", "PRE POLL", "EARLY", "POSTAL", "DECLARATION", "ABSENT", "IVOTE", "SPECIAL", "MOBILE"],
+  // Keywords flagging early-voting booths.
+  "data_check_jump_threshold": 0.15,
+  // Warn when seat formal total jumps by more than this fraction between elections.
+
+  // Share-model priors.
+  "beta_preset": "data",
+  // Key of beta_presets: 'data' or 'uniform'.
+  "beta_presets": {"data": {"default": [0.3, 0.30], "GRN": [0.3, 0.35]}, "uniform": {"default": [1.0, 0.15]}},
+  // Full presets dict: {preset_name: {party: [mean, sd] or 'default': [mean, sd]}}.
+  "beta_priors": null,
+  // Optional per-party {party: [mean, sd]} overrides on top of the preset.
+  "sigma_beta_sd": 0.20,
+  // HalfNormal scale for spread of booth sensitivities around mu_beta.
+  "m_prior_sd": 1.50,
+  // SD of seat-level party intercepts around empirical log-ratio.
+  "sigma_alpha_sd": 0.25,
+  // HalfNormal scale for booth baseline spread.
+  "sigma_eps_sd": null,
+  // HalfNormal scale for booth-election noise. Null = auto-calibrated.
+  "sigma_d_median": null,
+  // LogNormal median for seat tide sd. Null = auto-calibrated.
+  "sigma_d_sdlog": 0.7,
+  // LogNormal sdlog for seat tide prior.
+  "tide_process": "ar1",
+  // 'ar1' or 'random_walk' — how seat tide evolves across elections.
+  "d_persist": null,
+  // AR1 persistence rho. Null = estimated; a number fixes it.
+  "rho_beta_a": 2.0,
+  // Beta prior alpha for rho.
+  "rho_beta_b": 2.0,
+  // Beta prior beta for rho.
+  "use_correlated_errors": false,
+  // Use LKJ correlation between parties' tide and booth shocks.
+  "lkj_eta": 2.0,
+  // LKJ eta for correlated errors prior.
+  "include_eps": true,
+  // Include booth-election noise in predictive draws.
+
+  // MCMC settings (shortened for testing: 500/500/2/0.95; production normally 2000/2000/4/0.99).
+  "draws": 500,
+  // Posterior draws per chain.
+  "tune": 500,
+  // Tuning iterations per chain.
+  "chains": 2,
+  // Number of MCMC chains.
+  "seed": 42,
+  // Random seed.
+  "target_accept": 0.95,
+  // PyMC target_accept for NUTS.
+  "rhat_threshold": 1.01,
+  // Max acceptable R-hat; warns if exceeded.
+  "ess_threshold": 400.0,
+  // Min acceptable ESS; warns if below.
+
+  // Statewide poll handling.
+  "poll_half_life_months": 2.0,
+  // A poll loses half its weight every this many months.
+  "poll_as_of": null,
+  // Ignore polls after this date. Null = use all.
+  "poll_moe": null,
+  // Override computed poll MOE (points). Null = computed from sample sizes.
+  "poll_house_sd": 1.50,
+  // Extra poll error in points (house effect).
+  "time_horizon_gamma": 0.8,
+  // Extra poll sd = gamma * sqrt(years to election).
+  "poll_z": 1.96,
+  // Z-score for MOE (1.96 = 95% CI).
+  "poll_default_sample_size": 1000.0,
+  // Sample size when a poll row has none.
+  "poll_dirichlet_conc_floor": 10.0,
+  // Minimum Dirichlet concentration.
+  "poll_sum_warn": 102.0,
+  // Warn when poll shares incl. ONP sum to more than this.
+  "share_clip_floor": 0.001,
+  // Statewide shares clipped to at least this fraction.
+
+  // Formal votes per booth. Priority: total_formal_votes > projected_formal_votes > registered_electors > volume model.
+  "total_formal_votes": 52900,
+  // Fixed total formal votes V. Booth gets K*V where K ~ Dirichlet(historical shares * 100). Null = use projected/registered/volume model.
+  "registered_electors": 60500,
+  // Enrolment; formal votes = electors * turnout * (1 - informal rate).
+  "expected_turnout_rate": 0.90,
+  // Expected turnout fraction (0, 1].
+  "informal_rate_fallback": 0.04,
+  // Informal rate when booth file has no votes.
+  "election_cycle_years": 4.0,
+  // Years between elections.
+  "volume_draws": null,
+  // Volume MCMC draws. Null = same as draws.
+  "volume_tune_floor": 3000,
+  // Minimum tuning iterations for volume fit.
+  "volume_target_accept": 0.95,
+  // Volume model target_accept.
+  "volume_drift": "last",
+  // Early-vote log-odds drift: 'last', 'mean', or 'none'.
+  "volume_step_floor": 0.25,
+  // Minimum sd of next early-vote log-odds step.
+  "volume_total_sd_floor": 0.03,
+  // Minimum sd of log growth of seat total formal votes.
+  "vol_sigma_a_sd": 1.5,
+  // Volume model HalfNormal scale for booth share intercepts.
+  "vol_tau_sd": 0.5,
+  // Volume model sd for early-vote time effects.
+  "vol_kappa_alpha": 2.0,
+  // Volume model Gamma alpha.
+  "vol_kappa_beta": 0.005,
+  // Volume model Gamma beta.
+
+  // One Nation handling. 'none' | 'brian' | 'entry'. 'brian'/'entry' add ONP themselves; do not put ONP in parties.
+  "onp_mode": "entry",
+  // One Nation mode.
+  "onp_state_denominator": true,
+  // Keep ONP in statewide denominator.
+  "brian_transfer": null,
+  // For 'brian': {party: fraction} ONP takes. Null = uses brian_default.
+  "brian_default": {"LNP": 0.20, "ALP": 0.05},
+  // Default ONP transfer for brian mode.
+  "onp_seat_ratio_median": 0.65,
+  // For 'entry': median seat ONP share / statewide ONP share.
+  "onp_seat_ratio_sdlog": 0.5,
+  // For 'entry': sdlog of seat/statewide ONP ratio.
+  "onp_max_seat_share": 1.0,
+  // For 'entry': cap on ONP seat share.
+
+  // Step 8: optional preferential count (finalists, flows, 2CP, exhaustion, P(win)).
+  "opv_flows": null,
+  // Optional {pair: {source: [to_a, to_b, exhausted]}}. Null = data/sample_pref_flows.csv.
+  "opv_flow_conc": 133.0,
+  // Dirichlet concentration for flow noise. Null = fixed flows.
+  "opv_finalist_exclude": ["OTHER"],
+  // Catch-all buckets that cannot be finalists.
+  "opv_min_pair_prob": 0.9,
+  // Warn when reported pairing occurs in fewer draws than this fraction.
+  "opv_affinity_sd": 1.5,
+  // SD for affinities not pinned by a flow table.
+  "opv_entrants": ["ONP"],
+  // Parties with unknown preference behaviour.
+  "opv_proxies": null,
+  // Optional {entrant: {proxy: weight}} for unknown affinities.
+
+  // RunOptions fields — change what runs/is written, never the numbers.
+  "run_forecast": true,
+  // Run the forecast.
+  "run_backtest": false,
+  // Run historical backtest (slow).
+  "backtest_targets": null,
+  // Optional list of target years.
+  "backtest_state_mode": "auto",
+  // 'auto' | 'oracle' | 'polls' | 'noised'.
+  "backtest_min_polls": 1,
+  // For 'auto': min polls before using them.
+  "backtest_volume_mode": "actual",
+  // 'actual' | 'modelled' booth volumes in backtest.
+  "backtest_poll_horizon_days": null,
+  // For 'polls': ignore polls within this many days of election.
+  "run_volume_backtest": false,
+  // Run volume-model backtest.
+  "backtest_volume_sims": 4000,
+  // Volume simulations per backtest target.
+  "run_attribution": true,
+  // Uncertainty attribution.
+  "run_opv": true,
+  // Run Step 8 OPV count.
+  "make_pdf": true,
+  // Generate strategy PDF (needs reportlab).
+  "pdf_tier_cuts": [0.40, 0.80],
+  // Venue tier cuts.
+  "output_root": "forecast_output",
+  // Root output dir. Null = compute only.
+  "make_plots": true,
+  // Draw plots.
+  "print_report": true,
+  // Print terminal report at end.
+  "record_trace": true,
+  // Record S0-S8 trace signals.
+  "verbose": true,
+  // Print progress log lines.
+  "plot_top_n_booths": 15,
+  // Booths to label in ridgeline/swing plots.
+  "plot_dpi": 300,
+  // Plot resolution.
+  "plot_volume_log_scale": true,
+  // Log scale for volume ridgeline.
+  "plot_label_all_booths": true,
+  // Label all booths in swing scatter.
+  "plot_ridgeline_max_draws": 1500,
+  // Max draws in ridgeline plot.
+  "plot_ridgeline_keywords": ["PRE-POLL", "PREPOLL", "DECLARATION", "ABSENT", "POSTAL"]
+  // Booth keywords highlighted in ridgeline.
+}

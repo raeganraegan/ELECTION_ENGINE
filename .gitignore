@@ -5,11 +5,13 @@
 !.gitignore
 !README.md
 !executor.py
-!Executor.py
 !sample_booth_results.csv
 !sample_polls.csv
 !/backtest.py
 !/enki
 !/enki/*
-!/Showcase
-!/Showcase/*
+!/data
+!/data/*
+!/showcase
+!/showcase/*
+!config.jsonc

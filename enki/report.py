@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import ModelConfig, beta_prior_table
+from .enki import ModelConfig, beta_prior_table
 
 
 def print_run_report(y, cfg: ModelConfig) -> None:
