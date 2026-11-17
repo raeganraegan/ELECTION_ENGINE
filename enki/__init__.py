@@ -7,8 +7,8 @@
         helpers -> enki -> config, data -> polls, share_model -> volume_model, onp -> forecast
         (plots, report live in helpers and are called at write time.)
 """
-from .enki import ENKI, ENKIOutput, cli, main, resolve
+from .enki import ENKI, ENKIOutput, cli, main, resolve, backtest_enki
 from .enki import ModelConfig, PollInput, RunOptions
 from .helpers import write_all
 
-__all__ = ["ENKI", "ENKIOutput", "ModelConfig", "PollInput", "RunOptions", "main", "cli", "resolve", "write_all"]
+__all__ = ["ENKI", "ENKIOutput", "ModelConfig", "PollInput", "RunOptions", "main", "cli", "resolve", "backtest_enki", "write_all"]

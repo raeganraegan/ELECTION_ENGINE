@@ -172,6 +172,7 @@ class ModelConfig:
 @dataclass
 class RunOptions:
     run_forecast: bool
+    run_backtest: bool
     run_attribution: bool
     run_opv: bool
     make_pdf: bool
@@ -1605,7 +1606,7 @@ def run_forecast(df: pd.DataFrame, state_df: pd.DataFrame, poll: Union[PollInput
 
 # ----------------------------------------------------------------------------- input resolution + blackbox
 _DATA_KEYS = ("booth_results", "polls", "state_results", "projected_formal_votes",
-              "target_year")
+              "target_year", "seat_2cp_results")
 _TUPLE_FIELDS = ("parties", "opv_finalist_exclude", "opv_entrants", "pdf_tier_cuts",
                  "early_keywords", "exclude_booths", "scenario_pct", "plot_ridgeline_keywords")
 
@@ -1772,6 +1773,14 @@ def resolve(x) -> Resolved:
     if absent:
         raise ValueError(f"state_results is missing columns: {absent}")
 
+    if flat.get("seat_2cp_results") is None:
+        sr = _load_default("sample_seat_2cp.csv")
+        if sr is not None:
+            data["seat_2cp_results"], src["seat_2cp_results"] = sr, "<sample_seat_2cp.csv>"
+    else:
+        data["seat_2cp_results"] = read_frame(flat["seat_2cp_results"], "seat_2cp_results")
+        src["seat_2cp_results"] = _source(flat["seat_2cp_results"])
+
     pfv = flat.get("projected_formal_votes")
     if pfv is not None:
         data["projected_formal_votes"] = pfv if isinstance(pfv, pd.Series) else pd.Series(pfv, dtype=float)
@@ -1797,6 +1806,10 @@ def ENKI(x) -> ENKIOutput:
     y = ENKIOutput(config=json.loads(json.dumps(asdict(cfg), default=lambda o: str(o))),
                    run=json.loads(json.dumps(asdict(run), default=lambda o: str(o))),
                    data_sources=r.sources, warnings=r.warnings)
+
+    # Run backtest BEFORE the main forecast, writing plots into the same output folder
+    if run.run_backtest and x.get("output_root"):
+        backtest_enki(x, output_root=x.get("output_root"))
 
     df = prepare_booths(data["booth_results"], cfg)
     state_df = data["state_results"]
@@ -1847,4 +1860,299 @@ def cli(argv: Sequence[str]) -> ENKIOutput:
     x = load_x(path)
     x.update(over)
     return ENKI(x)
+
+
+# ----------------------------------------------------------------------------- backtest (walk-forward via ENKI on truncated data)
+def backtest_enki(x: dict, horizon_days: Optional[float] = None,
+                  output_root: Optional[str] = None) -> list[dict]:
+    """Walk-forward backtest: run ENKI on truncated data for each past election.
+
+    For each target election year T (from 3rd election onward in booth data):
+      1. Truncates booth_results to years < T
+      2. Truncates polls to dates < election_date[T] (minus horizon if given)
+      3. Uses state_results for years < T as history
+      4. Calls ENKI(x_truncated) -- identical code path to live forecast
+      5. Computes forecast vs actual for every party (primary vote) and every pair (OPV flows)
+      6. Writes validation plots to a multi-page PDF inside <output_root>/<seat>/<date>/ENKI/backtest/
+
+    Returns list of per-target result dicts.
+    """
+    from . import plots
+    from .helpers import output_folder
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    r = resolve(x)
+    cfg, run, data = r.cfg, r.run, r.data
+
+    booths_df = data["booth_results"].dropna(subset=["year"]).copy()
+    polls_df = data["polls"]
+    state_df = data["state_results"]
+
+    if "election_date" not in state_df.columns:
+        raise ValueError("state_df must have 'election_date' column for backtest.")
+
+    years = sorted(int(y) for y in booths_df["year"].unique())
+    if len(years) < 3:
+        log.warning("Backtest needs at least 3 election years in booth data "
+                    "(2 for training, 1 target).")
+        return []
+
+    elec_dates = {int(y): pd.Timestamp(d) for y, d in zip(state_df["year"], state_df["election_date"])}
+    parties = list(cfg.parties)
+    flows = resolve_flows(cfg)
+
+    results = []
+
+    # Output goes inside the same folder as the main forecast:
+    # <output_root>/<seat>/<date>/ENKI/backtest/backtest_validation.pdf
+    pdf_pages = None
+    if output_root is not None:
+        seat_folder = output_folder(output_root, cfg.seat_name, cfg.prediction_date)
+        backtest_dir = seat_folder / "ENKI" / "backtest"
+        backtest_dir.mkdir(parents=True, exist_ok=True)
+        pdf_pages = PdfPages(backtest_dir / "backtest_validation.pdf")
+
+    for tgt in years[2:]:
+        tgt = int(tgt)
+        elec_date = elec_dates[tgt]
+
+        # Truncate booth data to years strictly before target
+        train_booths = booths_df[booths_df["year"] < tgt].copy()
+        if train_booths.empty:
+            continue
+
+        # Truncate polls to dates before target election date
+        train_polls = polls_df.copy()
+        train_polls["date"] = pd.to_datetime(train_polls["date"])
+        cutoff = elec_date
+        if horizon_days is not None:
+            cutoff = elec_date - pd.Timedelta(days=horizon_days)
+        train_polls = train_polls[train_polls["date"] <= cutoff]
+        if train_polls.empty:
+            log.warning(f"[Backtest] Target {tgt}: no polls before cutoff, skipping.")
+            continue
+
+        # Truncate state data to years < target (history only for model fit)
+        train_state = state_df[state_df["year"] < tgt].copy()
+        if train_state.empty:
+            continue
+
+        # Build truncated input dict (ENKI accepts DataFrames directly).
+        # Only keep keys that are valid ModelConfig/RunOptions/data keys.
+        # run_backtest=False so the recursive ENKI call does not recurse into backtest.
+        cfg_names = {f.name for f in fields(ModelConfig)}
+        run_names = {f.name for f in fields(RunOptions)}
+        valid_keys = cfg_names | run_names | set(_DATA_KEYS)
+        x_trunc = {k: v for k, v in x.items() if k in valid_keys}
+        x_trunc["booth_results"] = train_booths
+        x_trunc["polls"] = train_polls
+        x_trunc["state_results"] = train_state
+        x_trunc["run_backtest"] = False
+        x_trunc["output_root"] = None
+
+        # Run ENKI on truncated data
+        y_trunc = ENKI(x_trunc)
+        if y_trunc.forecast is None:
+            continue
+
+        # Get actual booth data for target year
+        actual_booths = booths_df[booths_df["year"] == tgt]
+        if actual_booths.empty:
+            continue
+
+        actual_booths = actual_booths.copy()
+        for c in ["total_votes", "informal_votes"]:
+            if c in actual_booths.columns:
+                actual_booths[c] = clean_numeric(actual_booths[c])
+        actual_n = (actual_booths["total_votes"] - actual_booths["informal_votes"]).astype(float).values
+
+        # Compute actual primary shares per party from booth votes
+        party_votes = {}
+        for p in parties:
+            if p in actual_booths.columns:
+                actual_booths[p] = clean_numeric(actual_booths[p])
+                party_votes[p] = float(actual_booths[p].sum())
+        actual_primary_shares = {p: float(party_votes[p] / actual_n.sum() * 100.0) for p in party_votes}
+
+        # Compute actual OPV 2CP per pair from seat_2cp_results data (if available)
+        seat_2cp_df = data.get("seat_2cp_results")
+        actual_opv_2cp = {}
+        pair_list = []
+        if seat_2cp_df is not None:
+            seat_2cp_df = seat_2cp_df.copy()
+            seat_2cp_df["Election Year"] = seat_2cp_df["Election Year"].astype(int)
+            for i, A in enumerate(parties):
+                for B in parties[i+1:]:
+                    pair_key = f"{min(A, B)}_vs_{max(A, B)}"
+                    row = seat_2cp_df[seat_2cp_df["Election Year"] == tgt]
+                    if row.empty:
+                        continue
+                    if A not in row.columns or B not in row.columns:
+                        continue
+                    A_share = float(row[A].iloc[0])
+                    B_share = float(row[B].iloc[0])
+                    total = A_share + B_share
+                    if total > 0:
+                        actual_opv_2cp[pair_key] = A_share / total * 100.0
+                    pair_list.append((A, B))
+        else:
+            # Fall back to computing from booth votes + flow tables
+            for i, A in enumerate(parties):
+                for B in parties[i+1:]:
+                    pair_key = f"{min(A, B)}_vs_{max(A, B)}"
+                    if pair_key not in flows:
+                        continue
+                    pair_list.append((A, B))
+                    flow_table = flows[pair_key]
+                    first, second = pair_key.split("_vs_")
+
+                    A_2cp = party_votes.get(A, 0)
+                    B_2cp = party_votes.get(B, 0)
+
+                    for source in parties:
+                        if source == A or source == B:
+                            continue
+                        if source in actual_booths.columns:
+                            actual_booths[source] = clean_numeric(actual_booths[source])
+                            source_votes = float(actual_booths[source].sum())
+                        else:
+                            source_votes = 0
+                        if source_votes == 0:
+                            continue
+
+                        flow_row = None
+                        for src_key in flow_table:
+                            if str(src_key).upper() == source.upper():
+                                flow_row = flow_table[src_key]
+                                break
+                        if flow_row is None:
+                            continue
+
+                        to_first, to_second, _ = flow_row
+                        if first == A:
+                            to_A, to_B = to_first, to_second
+                        else:
+                            to_A, to_B = to_second, to_first
+
+                        A_2cp += source_votes * to_A
+                        B_2cp += source_votes * to_B
+
+                    total_2cp = A_2cp + B_2cp
+                    if total_2cp > 0:
+                        actual_opv_2cp[pair_key] = A_2cp / total_2cp * 100.0
+
+        # Get forecast results
+        seat_summary = y_trunc.seat_summary
+        if seat_summary is None:
+            continue
+
+        opv_result = y_trunc.opv
+
+        # ----- Primary vote plots for each party -----
+        for p in parties:
+            if p not in seat_summary.index:
+                continue
+            pred_share = float(seat_summary["mean"].loc[p])
+            actual_share = actual_primary_shares.get(p)
+            if actual_share is None:
+                continue
+
+            seat_error = pred_share - actual_share
+            seat_error_pct = (seat_error / actual_share * 100.0) if actual_share != 0 else float("nan")
+            seat_in_interval = False
+            if "p5" in seat_summary.columns and "p95" in seat_summary.columns:
+                seat_in_interval = bool(seat_summary["p5"].loc[p] <= actual_share <= seat_summary["p95"].loc[p])
+
+            result = {
+                "target": tgt,
+                "election_date": str(elec_date.date()),
+                "party": p,
+                "pair": None,
+                "type": "primary",
+                "seat_pred_median": pred_share,
+                "seat_actual": actual_share,
+                "seat_error": seat_error,
+                "seat_error_pct": seat_error_pct,
+                "seat_in_interval": seat_in_interval,
+                "forecast_draws": y_trunc.forecast.draws_df[p].dropna().values if y_trunc.forecast is not None and y_trunc.forecast.draws_df is not None else None,
+            }
+            results.append(result)
+
+            if pdf_pages is not None:
+                plots.backtest_validation_plot(y_trunc, result, pdf_pages, tgt, cfg, party=p)
+
+        # ----- OPV plots for each pair (both parties' 2CP shares) -----
+        if opv_result is not None:
+            seat_draws = opv_result.seat_draws
+            if seat_draws is None or "pair" not in seat_draws.columns:
+                continue
+
+            for A, B in pair_list:
+                pair_key = f"{min(A, B)}_vs_{max(A, B)}"
+                actual_2cp = actual_opv_2cp.get(pair_key)
+                if actual_2cp is None:
+                    continue
+
+                pair_mask = seat_draws["pair"].isin([f"{A} v {B}", f"{B} v {A}"])
+                if not pair_mask.any():
+                    continue
+
+                pair_draws = seat_draws[pair_mask]
+
+                # A's 2CP share
+                A_col = f"{A}_2CP_pct"
+                if A_col in pair_draws.columns:
+                    pred_2cp_A_values = pair_draws[A_col].dropna().values
+                    if len(pred_2cp_A_values) > 0:
+                        pred_2cp_A = float(np.median(pred_2cp_A_values))
+
+                        result_A = {
+                            "target": tgt,
+                            "election_date": str(elec_date.date()),
+                            "party": A,
+                            "pair": f"{A} v {B}",
+                            "type": "opv",
+                            "seat_pred_median": pred_2cp_A,
+                            "seat_actual": actual_2cp,
+                            "seat_error": pred_2cp_A - actual_2cp,
+                            "seat_error_pct": ((pred_2cp_A - actual_2cp) / actual_2cp * 100.0) if actual_2cp != 0 else float("nan"),
+                            "seat_in_interval": False,
+                            "forecast_draws": pred_2cp_A_values,
+                        }
+                        results.append(result_A)
+
+                        if pdf_pages is not None:
+                            plots.backtest_validation_plot(y_trunc, result_A, pdf_pages, tgt, cfg, party=A, pair=f"{A} v {B}")
+
+                # B's 2CP share
+                B_col = f"{B}_2CP_pct"
+                if B_col in pair_draws.columns:
+                    pred_2cp_B_values = pair_draws[B_col].dropna().values
+                    if len(pred_2cp_B_values) > 0:
+                        pred_2cp_B = float(np.median(pred_2cp_B_values))
+                        actual_2cp_B = 100.0 - actual_2cp
+
+                        result_B = {
+                            "target": tgt,
+                            "election_date": str(elec_date.date()),
+                            "party": B,
+                            "pair": f"{A} v {B}",
+                            "type": "opv",
+                            "seat_pred_median": pred_2cp_B,
+                            "seat_actual": actual_2cp_B,
+                            "seat_error": pred_2cp_B - actual_2cp_B,
+                            "seat_error_pct": ((pred_2cp_B - actual_2cp_B) / actual_2cp_B * 100.0) if actual_2cp_B != 0 else float("nan"),
+                            "seat_in_interval": False,
+                            "forecast_draws": pred_2cp_B_values,
+                        }
+                        results.append(result_B)
+
+                        if pdf_pages is not None:
+                            plots.backtest_validation_plot(y_trunc, result_B, pdf_pages, tgt, cfg, party=B, pair=f"{A} v {B}")
+
+    if pdf_pages is not None:
+        pdf_pages.close()
+
+    return results
+
 

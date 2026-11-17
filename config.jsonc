@@ -10,6 +10,8 @@
   // Optional booth-level formal votes, used as-is if set. Overrides registered_electors.
   "target_year": null,
   // Target year for volume growth. Null = last election year + election_cycle_years.
+  "seat_2cp_results": "data/sample_seat_2cp.csv",
+  // Path to statewide two-candidate-preferred results CSV. Columns: Election Year, Winning Party, ALP, LNP. Used for OPV backtest validation.
 
   // ModelConfig fields — these change the numbers the model produces.
   "seat_name": "sample",
@@ -34,13 +36,13 @@
   // Warn when seat formal total jumps by more than this fraction between elections.
 
   // Share-model priors.
-  "beta_preset": "data",
+  "beta_preset": "uniform",
   // Key of beta_presets: 'data' or 'uniform'.
   "beta_presets": {"data": {"default": [0.3, 0.30], "GRN": [0.3, 0.35]}, "uniform": {"default": [1.0, 0.15]}},
   // Full presets dict: {preset_name: {party: [mean, sd] or 'default': [mean, sd]}}.
-  "beta_priors": null,
+  "beta_priors": {"ALP": [0.8, 0.4], "LNP": [0.8, 0.4], "GRN": [0.4, 0.3]},
   // Optional per-party {party: [mean, sd]} overrides on top of the preset.
-  "sigma_beta_sd": 0.20,
+  "sigma_beta_sd": 0.40,
   // HalfNormal scale for spread of booth sensitivities around mu_beta.
   "m_prior_sd": 1.50,
   // SD of seat-level party intercepts around empirical log-ratio.
@@ -48,11 +50,11 @@
   // HalfNormal scale for booth baseline spread.
   "sigma_eps_sd": null,
   // HalfNormal scale for booth-election noise. Null = auto-calibrated.
-  "sigma_d_median": null,
+  "sigma_d_median": 0.45,
   // LogNormal median for seat tide sd. Null = auto-calibrated.
   "sigma_d_sdlog": 0.7,
   // LogNormal sdlog for seat tide prior.
-  "tide_process": "ar1",
+  "tide_process": "random_walk",
   // 'ar1' or 'random_walk' — how seat tide evolves across elections.
   "d_persist": null,
   // AR1 persistence rho. Null = estimated; a number fixes it.
@@ -90,7 +92,7 @@
   // Ignore polls after this date. Null = use all.
   "poll_moe": null,
   // Override computed poll MOE (points). Null = computed from sample sizes.
-  "poll_house_sd": 1.50,
+  "poll_house_sd": 0.50,
   // Extra poll error in points (house effect).
   "time_horizon_gamma": 0.8,
   // Extra poll sd = gamma * sqrt(years to election).
@@ -172,6 +174,8 @@
   // RunOptions fields — change what runs/is written, never the numbers.
   "run_forecast": true,
   // Run the forecast.
+  "run_backtest": true,
+  // Run historical backtest (walk-forward via ENKI on truncated data).
   "run_attribution": true,
   // Uncertainty attribution.
   "run_opv": true,

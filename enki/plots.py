@@ -273,3 +273,86 @@ def opv_seat_outcome(o, output_path, dpi: int = 300) -> None:
     sns.despine(top=True, right=True)
     plt.tight_layout()
     _finish(output_path, dpi)
+
+
+def backtest_validation_plot(y_trunc: Forecast, result: dict, pdf_pages,
+                             tgt: int, cfg: ModelConfig,
+                             party: Optional[str] = None,
+                             pair: Optional[str] = None) -> None:
+    """Backtest validation density plot with blue dashed line at actual outcome.
+
+    Handles both 'primary' (party primary vote) and 'opv' (two-candidate preferred)
+    result types. Saves the figure to the provided PdfPages object.
+    """
+    res = y_trunc.forecast
+    if res is None:
+        return
+
+    is_opv = result.get("type") == "opv"
+    draw_col = None
+
+    if is_opv:
+        pair_label = result.get("pair", "")
+        if pair_label is None:
+            return
+        opv_result = res.opv
+        if opv_result is None:
+            return
+        seat_draws = opv_result.seat_draws
+        if seat_draws is None or "pair" not in seat_draws.columns:
+            return
+        pair_mask = seat_draws["pair"].isin([pair_label])
+        if not pair_mask.any():
+            return
+        pair_draws = seat_draws[pair_mask]
+        col_name = f"{party}_2CP_pct" if party else None
+        if col_name is None or col_name not in pair_draws.columns:
+            return
+        draws = pair_draws[col_name].dropna().values
+        if len(draws) == 0:
+            return
+        xlabel = f"{party} two-candidate-preferred share (%)"
+        title = f"Backtest {tgt}: {cfg.seat_name} - {pair_label} (OPV flows)"
+    else:
+        p = party or result.get("party")
+        if p is None or res.draws_df is None or p not in res.draws_df.columns:
+            return
+        draws = res.draws_df[p].dropna().values
+        if len(draws) == 0:
+            return
+        xlabel = f"{p} primary vote share (%)"
+        title = f"Backtest {tgt}: {cfg.seat_name} - {p} (Primary vote)"
+
+    actual = result["seat_actual"]
+    pred = result["seat_pred_median"]
+    err_pct = result["seat_error_pct"]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # Histogram of forecast draws
+    ax.hist(draws, bins=30, density=True, alpha=0.4, color="#1f77b4", label="Forecast draws")
+
+    # Blue dashed line at actual outcome
+    ax.axvline(actual, color="blue", linestyle="--", linewidth=2,
+               label=f"Actual: {actual:.1f}%")
+
+    # Vertical line at prediction median
+    ax.axvline(pred, color="red", linestyle=":", linewidth=1.5,
+               label=f"Pred: {pred:.1f}%")
+
+    # Error annotation
+    ylim = ax.get_ylim()
+    ax.annotate(f"Error: {err_pct:+.1f}%",
+                xy=(pred, ylim[1] * 0.85),
+                xytext=(pred, ylim[1] * 0.7),
+                ha="center", fontsize=10, color="red",
+                arrowprops=dict(arrowstyle="->", color="red", lw=1))
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Density")
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    ax.legend()
+    plt.tight_layout()
+
+    pdf_pages.savefig(fig)
+    plt.close(fig)
