@@ -11,10 +11,6 @@ def print_run_report(y, cfg: ModelConfig) -> None:
     pd.set_option("display.width", 160)
     for w in y.warnings:
         print(f"WARNING: {w}")
-    if y.backtest is not None:
-        r = y.run
-        print(f"\nBACKTEST (share model; statewide input: {r.get('backtest_state_mode')}, volumes: {r.get('backtest_volume_mode')})")
-        print(y.backtest.round(2).T.to_string())
     res = y.forecast
     if res is None:
         return

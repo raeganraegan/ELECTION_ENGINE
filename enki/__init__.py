@@ -4,7 +4,7 @@
     y = ENKI({"booth_results": "booths.csv", "polls": "polls.csv", "seat_name": "Balmain"})
 
     Dependency order (each module imports only from those below it):
-        helpers -> enki -> config, data -> polls, share_model -> volume_model, onp -> forecast -> backtest
+        helpers -> enki -> config, data -> polls, share_model -> volume_model, onp -> forecast
         (plots, report live in helpers and are called at write time.)
 """
 from .enki import ENKI, ENKIOutput, cli, main, resolve

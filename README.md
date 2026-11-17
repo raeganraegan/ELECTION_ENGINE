@@ -267,21 +267,21 @@ Plots that fail are warnings, never fatal. A failed OPV step is a warning, never
 | $t = 1 \dots T$ | Past elections |
 | $i = 1 \dots D$ | Posterior draws |
 | $n_{bt}$ | Formal votes at booth $b$, election $t$ |
-| $S_{kt}$ | Statewide primary share of party $k$, election $t$ |
+| $S_{kt}$ | Statewide primary share of party $k$, election $t$ (%) |
 | $x_{kt} = \ln S_{kt} - \overline{\ln S_k}$ | Centred statewide log-swing for party $k$ |
 | $m_k$ | Party-level baseline (intercept) for party $k$ |
 | $\alpha_{kb}$ | Booth-specific baseline offset for party $k$ at booth $b$ |
 | $\beta_{kb}$ | Booth sensitivity of party $k$ at booth $b$ to its own statewide swing |
-| $d_{kt}$ | Seat-wide tide for party $k$ at election $t$ |
+| $d_{kt}$ | Seat-wide tide for party $k$ in election $t$ |
 | $d^*_k$ | Next-election tide step for party $k$ |
 | $\varepsilon_{kbt}$ | Booth-level election noise for party $k$ |
 | $\eta_{kbt}$ | Latent logit score before softmax |
-| $p_{kb}$ | Booth primary share for party $k$ at booth $b$ |
+| $p_{kb}$ | Booth primary share for party $k$ at booth $b$ (%) |
 | $p'_{kb}$ | Booth primary share after ONP adjustment |
 | $f_k$ | Fraction of party $k$'s vote that ONP takes |
 | $V_b$ | Formal votes at booth $b$ |
-| $s_k$ | Seat-wide primary share for party $k$ |
-| $w_i$ | Recency weight for poll $i$ ($w_i = 0.5^{\text{age}_i/H}$) |
+| $s_k$ | Seat-wide primary share for party $k$ (%) |
+| $w_i$ | Recency weight for poll $i$: $w_i = 0.5^{\text{age}_i/H}$ |
 | $\hat{s}_k$ | Recency-weighted poll average for party $k$ |
 | $\gamma$ | Time-horizon factor (default 0.8) |
 | $\tau$ | Years from prediction date to election date |
@@ -290,17 +290,17 @@ Plots that fail are warnings, never fatal. A failed OPV step is a warning, never
 
 ENKI runs Steps 0–8:
 
-| Step | Name | Output S(x) | Equations (compute by hand) | Code |
-| ----- | ----- | ----- | ----- | ----- |
-| **0. Prep** | Raw counts → shares, centred statewide log-swing | $x_{kt}$ ($T\times K$), $S_{kt}$ ($T\times K$), parties, years | $n_{bt} = \text{total}_{bt} - \text{informal}_{bt}$; $y_{\text{OTHER},bt} = n_{bt} - \sum_k y_{kbt}$; $S_{kt} = \frac{\sum_b y_{kbt}}{\sum_b n_{bt}}\times 100$; $x_{kt} = \ln S_{kt} - \frac{1}{T}\sum_t \ln S_{kt}$ | `build_design` |
-| **1. Fit** | Hierarchical multinomial-logit MCMC | $\theta^{(i)} = (m,\alpha,\beta,\sigma_d,\sigma_\alpha,\sigma_\varepsilon,d,\rho)$, $i=1\dots D$ | $\tilde\eta_{kbt} = m_k + \alpha_{kb} + \beta_{kb}x_{kt} + d_{kt} + \varepsilon_{kbt}$; $\eta_{kbt} = 3.5\tanh(\tilde\eta_{kbt}/3.5)$; $y_{bt}\sim\text{Multinomial}(n_{bt},\text{softmax}(\eta_{bt}))$; $\sum_k m_k = \sum_k\mu_{\beta,k}=0$; $\beta_{kb}=\mu_{\beta,k}+\sigma_{\beta,k}z$; $d_{kt}=\rho d_{k,t-1}+\sqrt{1-\rho^2}\sigma_{d,k}z_t$ (AR(1)) or $d_{kt}=d_{k,t-1}+\sigma_{d,k}z_t$ (random walk) | `fit_share_model` |
-| **2. Polls** | Weighted poll average + error budget → Dirichlet draws | $S^{(i)}$ ($D\times K$) | $w_i=0.5^{\text{age}_i/H}$; $\hat{s}_k = \frac{\sum_i w_i s_{ik}}{\sum_i w_i}$; $\text{se}^2=\text{se}_{\text{poll}}^2+\sigma_{\text{house}}^2+\gamma^2\tau$; $\text{conc}=\max\big(\frac{p(1-p)}{\text{se}^2}-1,10\big)$; $\mathbf{X}\sim\text{Dirichlet}(\text{conc}\cdot\hat{\mathbf{s}}/100)$; $S^{(i)}=X_{1..K}$, $S_{\text{ONP}}=X_{K+1}$ | `summarise_polls`, `draw_statewide` |
-| **3. Tide** | Statewide swing + seat tide → party shift | $\text{lin}_k$ ($D\times K$) | $x^*_k = \ln S_k - \overline{\ln S_k}$; $d^*_k=\rho d_{kT}+\sqrt{1-\rho^2}\sigma_{d,k}z_d$ (AR(1)) or $d^*_k=d_{kT}+\sigma_{d,k}z_d$ (random walk); $\text{lin}_k=\beta_k x^*_k+d^*_k$ | `simulate_shares` |
-| **4. Booths** | Booth-level shares via softmax | $p_b$ ($D\times B\times K$) | $\eta_{kb}=m_k+\alpha_{kb}+\text{lin}_{kb}+\sigma_{\varepsilon,k}z_\varepsilon$; $\mathbf{p}_b=\text{softmax}\big(3.5\tanh(\tilde{\boldsymbol{\eta}}_b/3.5)\big)$ | `simulate_shares` |
-| **5. Volumes** | Formal votes per booth | $V_b$ ($D\times B$) | Fixed total: $\mathbf{K}\sim\text{Dirichlet}(\text{hist. shares}\times 100)$; $V_b=K_b\times V_{\text{total}}$. Electors: $V_b=E\cdot r\cdot(1-\iota)\cdot\frac{n_{b,\text{last}}}{\sum_b n_{b,\text{last}}}$. Fitted: $\mathbf{n}_t\sim\text{DirichletMultinomial}\big(T_t,\kappa\,\text{softmax}(\mathbf{a}+\tau_t\cdot\text{early})\big)$ | `resolve_volumes` |
-| **6. ONP** | One Nation entry / transfer (mass-conserving) | $p'_b$ ($D\times B\times K+1$) | Brian: $p'_{kb}=(1-f_k)p_{kb}$, $p'_{\text{ONP},b}=\sum_k f_k p_{kb}$. Entry: $s=\text{clip}(\kappa S_{\text{ONP}}/100,0,s_{\max})$, $\ln\kappa\sim\mathcal{N}(\ln 0.65,0.5^2)$, $\mathbf{w}\sim\text{Dirichlet}(c\,\mathbf{w}^0)$, $s_b=\min\big(s\frac{\pi_b}{\bar\pi},0.5\big)$, $p'_{kb}=p_{kb}-s_b\frac{w_kp_{kb}}{\pi_b}$, $p'_{\text{ONP},b}=s_b$ | `apply_onp` |
-| **7. Seat** | Volume-weighted seat shares | $s_k$ ($D\times K+1$) | $s_k = \frac{\sum_b V_b p'_{kb}}{\sum_b V_b}$ (one value per posterior draw per party) | `run_forecast` |
-| **8. OPV** | Finalists + flows → 2CP, exhaustion, P(win) | 2CP %, exhausted, winner per draw | $r_{s\to c} = \frac{e^{u_{sc}}}{1+\sum_{c'\in C}e^{u_{sc'}}}$; count-by-count excludes lowest vote-getter until 2 finalists remain; $A_b = v_{fb}+\sum_k r_{k\to f}v_{kb}$; $B_b = v_{gb}+\sum_k r_{k\to g}v_{kb}$; $E_b=\sum_k r_{k\to\text{exh}}v_{kb}$; $\text{2CP}_f=\frac{\sum_b A_b}{\sum_b(A_b+B_b)}$; $\text{exhausted}=\frac{\sum_b E_b}{\sum_b V_b}$ | `compute_opv` |
+| Step | Name | Output | LaTeX equation | Code |
+| ---- | ---- | ------ | -------------- | ---- |
+| **0. Prep** | Raw counts → shares, centred log-swing | $x_{kt}$, $S_{kt}$, parties, years | $n_{bt} = \text{total}_{bt} - \text{informal}_{bt}$<br>$y_{\text{OTHER},bt} = n_{bt} - \sum_k y_{kbt}$<br>$S_{kt} = \frac{\sum_b y_{kbt}}{\sum_b n_{bt}} \times 100$<br>$x_{kt} = \ln S_{kt} - \frac{1}{T}\sum_t \ln S_{kt}$ | `build_design` |
+| **1. Fit** | Hierarchical multinomial-logit MCMC | Posterior draws $\theta^{(i)} = (m, \alpha, \beta, \sigma_d, \sigma_\alpha, \sigma_\varepsilon, d, \rho)$, $i = 1 \dots D$ | $\tilde{\eta}_{kbt} = m_k + \alpha_{kb} + \beta_{kb} x_{kt} + d_{kt} + \varepsilon_{kbt}$<br>$\eta_{kbt} = 3.5 \tanh(\tilde{\eta}_{kbt} / 3.5)$<br>$y_{bt} \sim \text{Multinomial}(n_{bt}, \text{softmax}(\eta_{bt}))$<br>$\sum_k m_k = 0$, $\sum_k \mu_{\beta,k} = 0$ | `fit_share_model` |
+| **2. Polls** | Weighted poll average + error budget → Dirichlet draws | $S^{(i)}$ (statewide share draws per draw $i$) | $w_i = 0.5^{\text{age}_i/H}$<br>$\hat{s}_k = \frac{\sum_i w_i s_{ik}}{\sum_i w_i}$<br>$\text{se}^2 = \text{se}_{\text{poll}}^2 + \sigma_{\text{house}}^2 + \gamma^2 \tau$<br>$\text{conc} = \max\big(\frac{p(1-p)}{\text{se}^2} - 1, 10\big)$<br>$S^{(i)} \sim \text{Dirichlet}(\text{conc} \cdot \hat{s} / 100)$ | `summarise_polls`, `draw_statewide` |
+| **3. Tide** | Statewide swing + seat tide → party shift | $\text{lin}_k$ (per-party shift per draw) | $x^*_k = \ln S_k - x_{\text{center},k}$<br>$d^*_k = \rho d_{kT} + \sqrt{1 - \rho^2} \, \sigma_{d,k} z_d$ (AR(1))<br>or $d^*_k = d_{kT} + \sigma_{d,k} z_d$ (random walk)<br>$\text{lin}_k = \beta_k x^*_k + d^*_k$ | `simulate_shares` |
+| **4. Booths** | Booth-level shares via softmax | $p_{kb}$ (booth share per draw per booth) | $\eta_{kb} = m_k + \alpha_{kb} + \text{lin}_{kb} + \sigma_{\varepsilon,k} z_\varepsilon$<br>$p_{kb} = \frac{\exp(\eta_{kb})}{\sum_k \exp(\eta_{kb})}$<br>(softmax normalises so shares sum to 100% per booth) | `simulate_shares` |
+| **5. Volumes** | Formal votes per booth | $V_b$ (formal votes per booth per draw) | Fixed total: $V_b = K_b \times V_{\text{total}}$, $K_b \sim \text{Dirichlet}(\text{hist\_shares} \times \text{conc})$<br>Electors: $V_b = E \cdot r \cdot (1 - \iota) \cdot \frac{n_{b,\text{last}}}{\sum_b n_{b,\text{last}}}$<br>Fitted: Dirichlet-multinomial fit (requires MCMC) | `resolve_volumes` |
+| **6. ONP** | One Nation entry / transfer (mass-conserving) | $p'_{kb}$ (post-ONP booth share) | Brian: $p'_{kb} = (1 - f_k) p_{kb}$, $p'_{\text{ONP},b} = \sum_k f_k p_{kb}$<br>Entry: $s = \text{clip}(\kappa S_{\text{ONP}} / 100, 0, s_{\max})$, $\ln \kappa \sim \mathcal{N}(\ln 0.65, 0.5^2)$<br>$s_b = \min\big(s \frac{\pi_b}{\bar{\pi}}, 0.5\big)$<br>$p'_{kb} = p_{kb} - s_b \frac{w_k p_{kb}}{\pi_b}$, $p'_{\text{ONP},b} = s_b$ | `apply_onp` |
+| **7. Seat** | Volume-weighted seat shares | $s_k$ (seat share per draw per party) | $s_k = \frac{\sum_b V_b p'_{kb}}{\sum_b V_b}$<br>(one value per posterior draw per party; sums to 100% across parties per draw) | `run_forecast` |
+| **8. OPV** | Finalists + flows → 2CP, exhaustion, P(win) | 2CP %, exhausted, winner per draw | $r_{s \to c} = \frac{\exp(u_{sc})}{1 + \sum_{c' \in C} \exp(u_{sc'})}$<br>Count-by-count: exclude lowest vote-getter until 2 finalists remain<br>$A_b = v_{fb} + \sum_k r_{k \to f} v_{kb}$<br>$B_b = v_{gb} + \sum_k r_{k \to g} v_{kb}$<br>$E_b = \sum_k r_{k \to \text{exh}} v_{kb}$<br>$\text{2CP}_f = \frac{\sum_b A_b}{\sum_b (A_b + B_b)}$, $\text{exhausted} = \frac{\sum_b E_b}{\sum_b V_b}$ | `compute_opv` |
 
 Steps 3 and 4 share one function (`simulate_shares`) because the same random draws feed both. Nothing writes into a shared dict during the run; `build_trace` flattens stage results into `s<step>_<name>` signals after the fact.
 
@@ -343,17 +343,23 @@ ENKI(x) =
 
 `S0` feeds `S1` (fit) and `S5` (volumes). `S1` and `S2` feed `S3`. `S3` feeds `S4`. `S4` feeds `S6`. `S6` and `S5` feed `S7`. `S6` and `S5` feed `S8`.
 
-### Core Equation
+### Core Equation (seat share, one draw)
 
 For each posterior draw $i$:
 
-$$s_k = \frac{\sum_b V_b \, p'_{kb}}{\sum_b V_b}$$
+$$
+s_k = \frac{\sum_b V_b \, p'_{kb}}{\sum_b V_b}
+$$
 
 where
 
-$$\boldsymbol{p}_b = \text{softmax}\Big(\boldsymbol{m} + \boldsymbol{\alpha}_b + \boldsymbol{\beta}_b \odot \boldsymbol{x}^* + \boldsymbol{d}^* + \boldsymbol{\varepsilon}_b\Big)$$
+$$
+p_{kb} = \frac{\exp(\eta_{kb})}{\sum_k \exp(\eta_{kb})}, \qquad
+\eta_{kb} = 3.5 \tanh\left(\frac{\eta_{\text{raw},kb}}{3.5}\right), \qquad
+\eta_{\text{raw},kb} = m_k + \alpha_{kb} + \text{lin}_{kb} + \varepsilon_{kb}
+$$
 
-and logits are soft-capped at $\pm 3.5$ (tanh) before the softmax, so every booth and the seat total sum to 100% in every draw.
+Every booth and the seat total sum to 100% in every draw.
 
 Parties are modelled jointly; the **last** party in `parties` is the reference category (fixed $\beta = 0$). Put `OTHER` last if present.
 
@@ -367,10 +373,10 @@ Backtest state modes: `auto`, `oracle`, `polls`, `noised`.
 
 ## Known Limitations
 
-* **The party-level slope** $\mu_{\beta,k}$ is mostly set by its prior; the data cannot separate "the seat followed the state" from "a local tide."
-* **No spatial autocorrelation.** Booth-level noise is spatially independent.
-* **Backtest honesty depends on inputs.** Elections with no polls fall back to the true statewide result (`"auto"`); `"actual"` volumes use true volumes. Use `"polls"` + `"modelled"` for an end-to-end score.
-* **Few elections per seat.** Judge across many seats, not one.
-* **ONP entry booth siphon** is not reflected in `booth_forecast` / `booth_draws_df` / attribution `target_scale` (they use the flat $(1-s)$); seat shares, booth party draws and OPV use the siphon.
-* **OPV is a simplified count:** seat-wide flows, IIA assumption, independents inside `OTHER` can never be finalists, no OPV backtest against real 2CP results.
-* **Volume and share are sampled independently**, ignoring joint turnout/vote-choice effects.
+* The party-level slope $\mu_{\beta,k}$ is mostly set by its prior; the data cannot separate "the seat followed the state" from "a local tide."
+* No spatial autocorrelation. Booth-level noise is spatially independent.
+* Backtest honesty depends on inputs. Elections with no polls fall back to the true statewide result (`"auto"`); `"actual"` volumes use true volumes. Use `"polls"` + `"modelled"` for an end-to-end score.
+* Few elections per seat. Judge across many seats, not one.
+* ONP entry booth siphon is not reflected in `booth_forecast`, `booth_draws_df`, or attribution `target_scale` (they use the flat $(1-s)$); seat shares, booth party draws and OPV use the siphon.
+* OPV is a simplified count: seat-wide flows, IIA assumption, independents inside `OTHER` can never be finalists, no OPV backtest against real 2CP results.
+* Volume and share are sampled independently, ignoring joint turnout/vote-choice effects.

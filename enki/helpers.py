@@ -63,14 +63,6 @@ def save_run_meta(folder, cfg: ModelConfig, booths_path: str, polls_path: str) -
     (meta_dir / "run_meta.json").write_text(json.dumps(meta, indent=2))
 
 
-def save_backtest_draws(draws_by_year: dict, folder: Union[str, Path]) -> None:
-    bt_dir = Path(folder) / "backtests"
-    bt_dir.mkdir(parents=True, exist_ok=True)
-    for y, d in draws_by_year.items():
-        np.savez_compressed(bt_dir / f"backtest_draws_{int(y)}.npz", booths=np.array(d["booths"]), parties=np.array(d["parties"]),
-                            booth_party_draws=d["booth_party_draws"], actual_party_votes=d["actual_party_votes"], actual_n=d["actual_n"])
-
-
 def save_trace(folder, trace: dict) -> None:
     draws_dir = Path(folder) / "draws"
     tables_dir = Path(folder) / "tables"

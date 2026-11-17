@@ -10,10 +10,6 @@
   // Optional booth-level formal votes, used as-is if set. Overrides registered_electors.
   "target_year": null,
   // Target year for volume growth. Null = last election year + election_cycle_years.
-  "backtest_polls": null,
-  // Optional separate poll table for backtests. Defaults to the same table as polls.
-  "election_dates": null,
-  // Optional {year: date} override. Defaults to dates read from state_results CSV.
 
   // ModelConfig fields — these change the numbers the model produces.
   "seat_name": "sample",
@@ -176,22 +172,6 @@
   // RunOptions fields — change what runs/is written, never the numbers.
   "run_forecast": true,
   // Run the forecast.
-  "run_backtest": false,
-  // Run historical backtest (slow).
-  "backtest_targets": null,
-  // Optional list of target years.
-  "backtest_state_mode": "auto",
-  // 'auto' | 'oracle' | 'polls' | 'noised'.
-  "backtest_min_polls": 1,
-  // For 'auto': min polls before using them.
-  "backtest_volume_mode": "actual",
-  // 'actual' | 'modelled' booth volumes in backtest.
-  "backtest_poll_horizon_days": null,
-  // For 'polls': ignore polls within this many days of election.
-  "run_volume_backtest": false,
-  // Run volume-model backtest.
-  "backtest_volume_sims": 4000,
-  // Volume simulations per backtest target.
   "run_attribution": true,
   // Uncertainty attribution.
   "run_opv": true,
